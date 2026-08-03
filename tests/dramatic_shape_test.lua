@@ -4491,6 +4491,75 @@ end)()
   T.eq(Gun.visible(), false, "and it is not drawn with the mode off")
 end)()
 
+-- ------- the two VR backends answer to the same name
+--
+-- lib/VR.lua is written against ONE surface and gets handed either VRXR
+-- (OpenXR, Windows) or VRCS (CompositorServices, visionOS) by VRBackend. That
+-- contract is what keeps VR.lua from growing a per-platform branch in every
+-- function, and nothing enforces it: a function added to VRXR and forgotten in
+-- VRCS is a nil call inside a render loop, on the one platform that needs a
+-- headset on someone's face to notice.
+--
+-- Read from SOURCE rather than by requiring the modules. Neither can actually
+-- load in this harness -- VRXR cdefs Win32 GL and looks for openxr_loader.dll,
+-- VRCS needs love.xr, which exists only inside the visionOS build -- and a
+-- test that can only run on the platform it is meant to protect protects
+-- nothing. What is being checked is a naming contract, and that is a property
+-- of the text.
+;(function()
+  local function read(path)
+    local fh = io.open(path, "r")
+    if not fh then return nil end
+    local src = fh:read("*a")
+    fh:close()
+    return src
+  end
+
+  -- Functions only. VRXR also publishes VRXR.XR, the raw ffi cdef namespace,
+  -- and that is not something a backend without FFI could ever mirror -- it
+  -- is OpenXR's own vocabulary, not part of the surface VR.lua speaks.
+  local function functionsOf(src, ns)
+    local names = {}
+    for n in src:gmatch("function%s+" .. ns .. "%.([%w_]+)%s*%(") do names[n] = true end
+    for n in src:gmatch(ns .. "%.([%w_]+)%s*=%s*function") do names[n] = true end
+    return names
+  end
+
+  local function fieldsOf(src, ns)
+    local names = {}
+    for n in src:gmatch(ns .. "%.([%w_]+)%s*=") do names[n] = true end
+    return names
+  end
+
+  local xrSrc = read(MOD_PATH .. "/lib/VRXR.lua")
+  local csSrc = read(MOD_PATH .. "/lib/VRCS.lua")
+  T.eq(xrSrc ~= nil, true, "VRXR source is readable")
+  T.eq(csSrc ~= nil, true, "VRCS source is readable")
+
+  if xrSrc and csSrc then
+    local xr = functionsOf(xrSrc, "VRXR")
+    local cs = functionsOf(csSrc, "VRCS")
+    local missing = {}
+    for name in pairs(xr) do
+      if not cs[name] then missing[#missing + 1] = name end
+    end
+    table.sort(missing)
+    T.eq(#missing, 0,
+      "every VRXR entry point has a VRCS counterpart; missing: "
+      .. table.concat(missing, ", "))
+
+    -- The capability flags VR.lua branches on. VRXR gets these filled in by
+    -- VRBackend (OpenXR's answers are the defaults there), but VRCS states
+    -- its own, and a missing one reads as false -- which would silently turn
+    -- off vsync handover or make the mod look for a mirror window that does
+    -- not exist.
+    local csFields = fieldsOf(csSrc, "VRCS")
+    for _, flag in ipairs({ "kind", "takesOverVSync", "hasMirror", "hasQuadLayer" }) do
+      T.eq(csFields[flag] ~= nil, true, "VRCS declares " .. flag)
+    end
+  end
+end)()
+
 Pipelines.reset()
 run.release()
 

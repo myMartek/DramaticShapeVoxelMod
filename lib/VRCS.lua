@@ -35,6 +35,11 @@ VRCS.hasQuadLayer = false
 local status = "not started"
 local views = nil
 
+-- Declared here because stop() below is compiled before the eye-buffer
+-- section defines it, and a local that is not yet in scope would resolve to a
+-- nil global instead -- an error that only fires when someone leaves VR.
+local dropScratch
+
 function VRCS.status() return status end
 
 local function available()
@@ -60,6 +65,10 @@ end
 
 function VRCS.stop()
   pcall(function() if love.xr then love.xr.release() end end)
+  -- Two eye-sized canvases is tens of megabytes; leaving them allocated
+  -- across a session the player has left is the kind of thing that only
+  -- shows up as a memory warning much later, in some unrelated scene.
+  dropScratch()
   views = nil
   status = "stopped"
 end
@@ -101,26 +110,104 @@ function VRCS.locateViews()
   return views
 end
 
--- The drawable's texture for this eye, as a Canvas the scene renders into.
--- VRXR hands back a GL texture name that VRGL then blits a canvas into; there
--- is no blit here at all, which is a frame's worth of copying saved per eye.
+-- ------- the eye buffers, and the one flip between them
+--
+-- The scene does NOT draw straight into the compositor's texture, even though
+-- it could.  It draws into a scratch canvas of our own and releaseEye copies
+-- that across, turned upside down.  One full-screen textured quad per eye, so
+-- roughly a third of a millisecond and two canvases' worth of memory.  That
+-- is a real cost and it is worth stating why it is paid.
+--
+-- lib/Voxel3D.lua premultiplies Mat4.scale(1,-1,1) onto every projection,
+-- because the mod bypasses LOVE's transform_projection and has to reproduce
+-- the Y inversion LOVE applies to canvas projections itself.  On OpenGL that
+-- is exactly right.  On Metal LOVE inverts nothing -- its render targets are
+-- top-left already -- so the world canvas comes out vertically mirrored, and
+-- the host quietly turns it back over when it composites (see the
+-- worldOverride blit in src/render/Renderer.lua: it draws with a negative Y
+-- scale on iOS under LOVE 12, and only there).  Two errors that cancel.
+--
+-- The flip is not confined to that one matrix, though.  It is a CONVENTION:
+-- "after vp, clip Y maps to the canvas row as y * 0.5 + 0.5".  Voxel3D's
+-- horizonY, horizonLine, skyBody, drawWorldDisc and project all read it that
+-- way, and so do the water shaders.  Removing the flip for the eyes alone
+-- would silently invert all of them, on a path that can only be checked by
+-- putting the headset on.
+--
+-- So the convention stays whole and the correction happens once, here, where
+-- the image leaves the mod -- the same correction the host already makes for
+-- the flat screen, in the same place in the pipeline.  When the convention is
+-- eventually unified against love.graphics.getRendererInfo() (the honest
+-- fix, and a much wider change), this scratch canvas and its blit are what
+-- gets deleted.
+
+local scratch = {}
+
+local function eyeScratch(i, model)
+  local w, h = model:getWidth(), model:getHeight()
+  local c = scratch[i]
+  if c and c:getWidth() == w and c:getHeight() == h then return c end
+  if c then pcall(c.release, c) end
+  -- Same pixel format as the drawable, so the copy is a copy and not a
+  -- silent colour-space conversion.
+  local ok, made = pcall(love.graphics.newCanvas, w, h,
+                         { format = model:getFormat() })
+  if not ok then
+    -- A driver that will not give us that format is not a reason to lose the
+    -- frame: fall back to the default and accept whatever conversion the
+    -- blit then does.
+    ok, made = pcall(love.graphics.newCanvas, w, h)
+  end
+  scratch[i] = ok and made or nil
+  return scratch[i]
+end
+
+-- Assigns the forward declaration at the top of the file.
+function dropScratch()
+  for i, c in pairs(scratch) do
+    pcall(c.release, c)
+    scratch[i] = nil
+  end
+end
+
+-- The canvas this eye's scene renders into.  Not the compositor's texture
+-- itself -- see above.
 function VRCS.eyeCanvas(i)
   if not available() then return nil end
   local ok, canvas = pcall(love.xr.eyeCanvas, i)
-  if not ok then return nil end
-  return canvas
+  if not ok or not canvas then return nil end
+  return eyeScratch(i, canvas) or canvas
 end
 
 -- VRXR acquires and releases swapchain images around each eye.  Compositor
--- drawables have no such handshake, so these exist only so lib/VR.lua can call
--- the same sequence for either backend.
+-- drawables have no such handshake, so acquireEye exists only so lib/VR.lua
+-- can call the same sequence for either backend.  releaseEye, by contrast,
+-- does real work here: it is where the eye actually reaches the compositor.
 function VRCS.acquireEye(i)
   local canvas = VRCS.eyeCanvas(i)
   if not canvas then return nil end
   return canvas, canvas:getWidth(), canvas:getHeight()
 end
 
-function VRCS.releaseEye() end
+function VRCS.releaseEye(i)
+  local src = scratch[i]
+  if not src or not available() then return end
+  local ok, dst = pcall(love.xr.eyeCanvas, i)
+  if not ok or not dst or dst == src then return end
+  pcall(function()
+    love.graphics.setCanvas(dst)
+    love.graphics.setShader()
+    love.graphics.setDepthMode()
+    love.graphics.setBlendMode("replace", "premultiplied")
+    love.graphics.setColor(1, 1, 1, 1)
+    -- Drawn from the bottom edge upward: this is the vertical mirror that
+    -- undoes Voxel3D's clip-space flip, and it is the whole point of the
+    -- scratch canvas.
+    love.graphics.draw(src, 0, src:getHeight(), 0, 1, -1)
+    love.graphics.setBlendMode("alpha")
+    love.graphics.setCanvas()
+  end)
+end
 
 function VRCS.endFrame()
   if not available() then return false end
