@@ -338,8 +338,13 @@ end
 -- for one, so a session that never sees a lake never pays for it.
 local function releaseSlot(slotHeld)
   for _, key in ipairs({ "canvas", "depth", "mirror" }) do
-    local obj = slotHeld[key]
-    if obj and obj.release then pcall(obj.release, obj) end
+    -- A borrowed colour buffer belongs to whoever lent it -- on visionOS the
+    -- compositor, which recycles its drawables.  Releasing one here would free
+    -- a texture still in that rotation.
+    if not (key == "canvas" and slotHeld.borrowed) then
+      local obj = slotHeld[key]
+      if obj and obj.release then pcall(obj.release, obj) end
+    end
     slotHeld[key] = nil
   end
 end
@@ -809,7 +814,12 @@ end
 -- void transparent, which is what every rung below it wants.
 -- `slot` names which cached canvas to render into (see `slots` above);
 -- omitted is the free-roam world pass.
-function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot)
+-- `target` lets a caller supply the colour buffer instead of having one
+-- allocated here: on visionOS an eye is the compositor's own drawable texture,
+-- so the scene renders where the compositor will read it and no per-eye copy
+-- happens at all.  The depth buffer is still ours and still cached per slot --
+-- the drawable rotates every frame, the depth does not have to.
+function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, target)
   -- the wireframe variant when the player has it on AND it built; either
   -- answer falls through to the plain scene rather than to no scene
   local grid = VoxelGrid.enabled()
@@ -820,7 +830,17 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot)
   if not sh then return false end
   local name = slot or "world"
   local slotHeld = slots[name]
-  if not (slotHeld and slotHeld.w == w and slotHeld.h == h) then
+  if target then
+    -- Supplied colour buffer.  Only the depth is cached, and only while the
+    -- size holds; the target itself changes every frame because the
+    -- compositor hands out its drawables in rotation.
+    if not (slotHeld and slotHeld.w == w and slotHeld.h == h and slotHeld.borrowed) then
+      if slotHeld then releaseSlot(slotHeld) end
+      slotHeld = { w = w, h = h, depth = newDepth(w, h), borrowed = true }
+      slots[name] = slotHeld
+    end
+    slotHeld.canvas = target
+  elseif not (slotHeld and slotHeld.w == w and slotHeld.h == h and not slotHeld.borrowed) then
     local ok, c = PixelCanvas.new(w, h)
     if not ok then return false end
     c:setFilter("nearest", "nearest")

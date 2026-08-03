@@ -49,8 +49,18 @@ local VoxelScene = V.require("VoxelScene")
 local FirstPerson = V.require("FirstPerson")
 local BattleCam = V.require("BattleCam")
 local VRRig = V.require("VRRig")
-local VRXR = V.require("VRXR")
-local VRGL = V.require("VRGL")
+-- Deliberately still called VRXR: every other reference in this file then
+-- needs no change at all.  What it now holds is whichever backend the
+-- platform has -- OpenXR on Windows, CompositorServices on visionOS.
+local VRBackend = V.require("VRBackend")
+-- Empty table rather than nil when no backend applies: VR.update never runs
+-- then (VR.supported() is false), but VR.mirror and VR.invalidate are called
+-- unconditionally from main.lua and must not fault on a nil index.
+local VRXR = VRBackend.get() or {}
+-- VRGL is raw WGL and only ever loads alongside OpenXR.  On visionOS an eye is
+-- a Canvas the scene draws into, so there is nothing to blit and nothing to
+-- load.
+local VRGL = (VRBackend.kind() == "openxr") and V.require("VRGL") or nil
 local Pokedex = V.require("Pokedex")
 
 local VR = {}
@@ -147,9 +157,17 @@ VR.paletteFor = nil
 -- have no love.system and answer true, which costs nothing: enabling VR
 -- there stops at VRXR.start like it always did.
 function VR.supported()
+  -- visionOS reports its OS as "iOS" on purpose (the engine port keeps every
+  -- existing iOS branch working), so the backend's own answer is the reliable
+  -- one and the OS string is only a fallback for the headless test suite.
+  if VRBackend.available() then return true end
   local ok, os = pcall(function() return love.system.getOS() end)
   if not ok or not os then return true end
   return os == "Windows"
+end
+
+function VR.backendKind()
+  return VRBackend.kind()
 end
 
 function VR.enabled()
@@ -382,6 +400,9 @@ local function renderWorld(views, ctl)
       camera = VRRig.eyeCamera(v.pose, v.fov, pivot, anchor, scale, mountYaw),
       w = v.w, h = v.h,
       slot = i == 1 and "vrL" or "vrR",
+      -- On CompositorServices the eye IS the compositor's texture, so the
+      -- scene renders where it will be read and the blit below never runs.
+      target = VRXR.eyeCanvas and VRXR.eyeCanvas(i) or nil,
       -- the battle seat is a placed shot, not the first-person rig: the
       -- cards keep their stage lean rather than yawing at this eye, and
       -- the player's own card stays visible in it
@@ -417,7 +438,9 @@ local function renderWorld(views, ctl)
 
   for i = 1, 2 do
     local canvas = canvases[i]
-    local tex, tw, th = VRXR.acquireEye(i)
+    -- Nothing to copy when the scene already drew into the compositor's own
+    -- texture; VRGL is nil on that path in any case.
+    local tex, tw, th = VRGL and VRXR.acquireEye(i) or nil
     if tex then
       local fbo = fboCache[canvas]
       if not fbo then
