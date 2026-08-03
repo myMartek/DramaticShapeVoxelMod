@@ -5,3 +5,13 @@ __pycache__/
 
 # agent worktrees and local scratch
 .claude/
+
+# The authoring tools in tools/ and assets/docs/buidling_to_voxel/ read an
+# imported ROM cache on whatever machine runs them. Nothing derived from
+# cartridge bytes is committable.
+*.gb
+*.gbc
+*.sav
+*.sgm
+data/generated/
+assets/generated/
