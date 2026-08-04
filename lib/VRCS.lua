@@ -42,11 +42,36 @@ local dropScratch
 
 function VRCS.status() return status end
 
+-- Whether a frame can be driven THIS INSTANT: a compositor layer is attached.
+-- False in the launcher window, true inside the immersive space. Every
+-- per-frame entry point below guards on this.
 local function available()
   return love.xr ~= nil and love.xr.available()
 end
 
 VRCS.available = available
+
+-- Whether this build can do VR at all -- which is what decides whether the mod
+-- OFFERS its VR row, and is a different question entirely.
+--
+-- The distinction is not academic. main.lua builds the settings schema once,
+-- when the mod loads, and that happens at app start in the launcher window
+-- where no immersive space exists yet. Asking `available` there answers "no
+-- layer attached", the VR row is left out of the schema, and since the schema
+-- is built exactly once, entering the space later cannot put it back. The row
+-- the player is supposed to switch VR on with simply was not there.
+--
+-- love.xr exists only in a visionOS build, so its presence is nearly the whole
+-- answer; love.xr.supported() is the engine agreeing. The fallback covers an
+-- engine build from before that function existed.
+function VRCS.supported()
+  if love.xr == nil then return false end
+  if love.xr.supported ~= nil then
+    local ok, yes = pcall(love.xr.supported)
+    if ok then return yes == true end
+  end
+  return true
+end
 
 -- Takes the frame loop from the host shell and brings world tracking up.
 function VRCS.start()

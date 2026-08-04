@@ -32,9 +32,21 @@ local function detect()
   -- signal than any OS string. love.system.getOS() deliberately still reports
   -- "iOS" on visionOS (see mobile/visionos/README.md in the engine port), so
   -- asking it would give the wrong answer.
-  if love.xr ~= nil and love.xr.available() then
+  --
+  -- The question here is CAPABILITY, not liveness. This runs while the mod is
+  -- loading, which on visionOS is at app start in the launcher window, with no
+  -- immersive space and therefore no compositor layer. Asking whether a layer
+  -- is attached (love.xr.available) answers "no" there, no backend is chosen,
+  -- VR.supported() is false, and main.lua leaves the VR row out of a settings
+  -- schema it only ever builds once -- so the row never appears and VR cannot
+  -- be switched on at all. Liveness is VRCS.start's problem, and it already
+  -- fails cleanly when no session can begin.
+  if love.xr ~= nil then
     local ok, mod = pcall(V.require, "VRCS")
-    if ok and mod then backend = mod; return backend end
+    if ok and mod and mod.supported and mod.supported() then
+      backend = mod
+      return backend
+    end
   end
 
   local os = nil
