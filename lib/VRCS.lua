@@ -32,6 +32,16 @@ VRCS.hasMirror = false
 -- XrCompositionLayerQuad.  The 2D UI has to become geometry in the scene.
 VRCS.hasQuadLayer = false
 
+-- The session can come back by itself, and routinely does.
+--
+-- The compositor layer exists only while the immersive space is open, and
+-- the player closes and reopens that with the Digital Crown as a matter of
+-- course -- a new layer arrives each time. Unlike an OpenXR runtime going
+-- away, which really is "something broke, tell the player", this is an
+-- ordinary thing that happens several times a session, so lib/VR.lua must
+-- keep retrying instead of latching the failure.
+VRCS.resumable = true
+
 local status = "not started"
 local views = nil
 
@@ -173,15 +183,26 @@ local function eyeScratch(i, model)
   local c = scratch[i]
   if c and c:getWidth() == w and c:getHeight() == h then return c end
   if c then pcall(c.release, c) end
-  -- Same pixel format as the drawable, so the copy is a copy and not a
+  -- dpiscale = 1 is NOT optional, and leaving it out is what made the eye a
+  -- portrait patch in a black field.
+  --
+  -- LOVE sizes a canvas in UNITS and multiplies by the dpi scale to get
+  -- pixels, so newCanvas(2048, 1984) on a display that reports a scale of 2
+  -- is 4096x3968 pixels while still answering 2048x1984 to getWidth(). The
+  -- scene then fills those pixels, and the 1:1 blit into a 2048-wide drawable
+  -- copies a corner of it. lib/PixelCanvas.lua pins the same value for the
+  -- same reason; this is a compositor texture measured in real pixels, and
+  -- units have to mean pixels here.
+  --
+  -- Same pixel format as the drawable too, so the copy is a copy and not a
   -- silent colour-space conversion.
   local ok, made = pcall(love.graphics.newCanvas, w, h,
-                         { format = model:getFormat() })
+                         { format = model:getFormat(), dpiscale = 1 })
   if not ok then
     -- A driver that will not give us that format is not a reason to lose the
     -- frame: fall back to the default and accept whatever conversion the
-    -- blit then does.
-    ok, made = pcall(love.graphics.newCanvas, w, h)
+    -- blit then does. dpiscale stays pinned.
+    ok, made = pcall(love.graphics.newCanvas, w, h, { dpiscale = 1 })
   end
   scratch[i] = ok and made or nil
   return scratch[i]
@@ -214,16 +235,110 @@ function VRCS.acquireEye(i)
   return canvas, canvas:getWidth(), canvas:getHeight()
 end
 
+-- TEMPORARY (visionOS port): the eye map is taken on a SETTLED frame.
+--
+-- The first reading showed the top 45% of the canvas drawn and the rest
+-- black, which looks like a broken vertical projection -- but it was frame
+-- one, where the ground mesh does not exist yet, and "the terrain has not
+-- been built" looks exactly the same from a colour sample. Nothing can be
+-- concluded from that. This waits until the world has had a few seconds to
+-- finish meshing, so a black lower half means the projection and not the
+-- chunk queue.
+local releaseFrames = 0
+local MAP_AT_FRAME = 400
+
 function VRCS.releaseEye(i)
   local src = scratch[i]
-  if not src or not available() then return end
   local ok, dst = pcall(love.xr.eyeCanvas, i)
+
+  releaseFrames = releaseFrames + 1
+  local loggedRelease = releaseFrames ~= MAP_AT_FRAME
+
+  -- TEMPORARY (visionOS port): whether this path runs at all.
+  -- Every early return below is silent, and a silent skip looks exactly like
+  -- a blit that misses -- so "no green appeared" would say nothing.
+  if not loggedRelease then
+    loggedRelease = true
+    local function dims(o)
+      if not o then return "nil" end
+      local w, h, pw, ph = -1, -1, -1, -1
+      pcall(function()
+        w, h = o:getWidth(), o:getHeight()
+        pw, ph = o:getPixelWidth(), o:getPixelHeight()
+      end)
+      return ("%dx%d units / %dx%d px"):format(w, h, pw, ph)
+    end
+    print(("[vr-probe] releaseEye: available=%s scratch=%s drawable=%s same=%s")
+      :format(tostring(available()), dims(src), dims(ok and dst or nil),
+              tostring(src ~= nil and dst == src)))
+
+    -- The frustum this eye was given, and the shape it implies.
+    --
+    -- A vertical field of view that disagrees with the texture is the
+    -- remaining explanation for a horizontal cut, and it is one number away
+    -- from being settled: the tangent extents of the frustum, as an aspect,
+    -- must match the texture's. If they do, the projection is innocent and
+    -- the black half is content that was never drawn.
+    local v = views and views[1]
+    if v and v.fov then
+      local f = v.fov
+      local tw = math.tan(f.angleRight) - math.tan(f.angleLeft)
+      local th = math.tan(f.angleUp) - math.tan(f.angleDown)
+      print(("[vr-probe] fov L=%.4f R=%.4f U=%.4f D=%.4f | tan extent %.4f x %.4f")
+        :format(f.angleLeft, f.angleRight, f.angleUp, f.angleDown, tw, th))
+      print(("[vr-probe] frustum aspect=%.4f texture aspect=%.4f")
+        :format(tw / (th ~= 0 and th or 1), (v.w or 1) / (v.h or 1)))
+    end
+
+    -- WHERE the picture actually is, read off the eye itself.
+    --
+    -- Three explanations for the portrait patch have been measured and
+    -- disproved, and asking someone in a headset to describe a border is a
+    -- slow and lossy way to find a fourth. This reads the canvas back and
+    -- prints a coarse map of it: '#' where a pixel carries colour, '.' where
+    -- it is black. The shape of the drawn region is then a fact rather than a
+    -- description, and its edges say whether they fall at the flat view's
+    -- 9:16 or somewhere else entirely.
+    if src then
+      local okR, img = pcall(love.graphics.readbackTexture, src)
+      if okR and img then
+        local W, H = src:getPixelWidth(), src:getPixelHeight()
+        local COLS, ROWS = 24, 16
+        print(("[vr-probe] eye map %dx%d (# = drawn, . = black):"):format(W, H))
+        for r = 0, ROWS - 1 do
+          local line = {}
+          for c = 0, COLS - 1 do
+            local x = math.min(W - 1, math.floor((c + 0.5) * W / COLS))
+            local y = math.min(H - 1, math.floor((r + 0.5) * H / ROWS))
+            local okP, pr, pg, pb = pcall(img.getPixel, img, x, y)
+            local lit = okP and (pr + pg + pb) > 0.02
+            line[#line + 1] = lit and "#" or "."
+          end
+          print("[vr-probe] |" .. table.concat(line) .. "|")
+        end
+      else
+        print("[vr-probe] eye map: readback failed")
+      end
+    end
+  end
+
+  if not src or not available() then return end
   if not ok or not dst or dst == src then return end
   pcall(function()
     love.graphics.setCanvas(dst)
     love.graphics.setShader()
     love.graphics.setDepthMode()
     love.graphics.setBlendMode("replace", "premultiplied")
+    -- TEMPORARY (visionOS port): the eye picture fills only a portrait patch
+    -- of the view, and three separate explanations for that have now been
+    -- measured and disproved (render size, world extent, dpi scale -- the
+    -- canvas is 2048x1984 units AND pixels, exactly the drawable). So mark
+    -- the parts of the compositor texture this blit does NOT cover.
+    --
+    -- The green clear that used to be here is gone: no green ever showed,
+    -- which means this blit covers the drawable completely and the black
+    -- borders are inside the SOURCE. The eye map above measures that
+    -- directly, and a green fill would have made every sample read as drawn.
     love.graphics.setColor(1, 1, 1, 1)
     -- Drawn from the bottom edge upward: this is the vertical mirror that
     -- undoes Voxel3D's clip-space flip, and it is the whole point of the
@@ -240,12 +355,69 @@ function VRCS.endFrame()
   return ok and done == true
 end
 
--- Input is not wired yet: the pad reaches the game through SDL's own path, and
--- the PSVR2 Sense controllers need ARKit accessory tracking.  Returning nil is
--- a state lib/VR.lua already handles -- it is what OpenXR's simple_controller
--- profile produces, which has no poses either.
-function VRCS.input()
+-- ------- input
+--
+-- STICKS ONLY, deliberately.
+--
+-- The pad already reaches the game: SDL enumerates it, LOVE delivers its
+-- events, and the engine's own handler walks and presses buttons with it.
+-- That is why the left stick and A/B work with no help from here.
+--
+-- What does NOT work that way is anything the MOD owns rather than the engine
+-- -- above all the right stick, which is this mod's snap/smooth turn and its
+-- diorama zoom. Those are read from the ctl table alone, so returning nil
+-- meant lib/VR.lua's driveControls bailed out on its first line and the right
+-- stick did nothing at all.
+--
+-- Buttons are left nil ON PURPOSE. driveControls feeds them through setGB,
+-- which is edge-triggered on its own overlay channel; reporting a button the
+-- engine is already delivering would press it twice. Left nil, setGB's
+-- `down` is falsy and its `held` entry never set, so it neither presses nor
+-- releases and the working path is untouched. When the PSVR2 Sense pair
+-- arrives -- whose buttons the engine has no path for -- this is where they
+-- go, and the double-press question has to be answered then.
+--
+-- Poses (handl/handr/aimr) stay absent: they need ARKit accessory tracking.
+-- That is a state lib/VR.lua already handles, being what OpenXR's
+-- simple_controller profile produces.
+
+local DEADZONE = 0.12
+
+local function axis(pad, name)
+  local ok, v = pcall(pad.getGamepadAxis, pad, name)
+  if not ok or type(v) ~= "number" then return 0 end
+  -- Zeroed, not rescaled: driveControls applies its own thresholds (0.2 for
+  -- the smooth turn, 0.65/0.35 for the snap's hysteresis, 0.15 for the zoom)
+  -- and rescales from them. Rescaling here too would move all three.
+  if math.abs(v) < DEADZONE then return 0 end
+  return v
+end
+
+local function firstGamepad()
+  local ok, pads = pcall(love.joystick.getJoysticks)
+  if not ok or type(pads) ~= "table" then return nil end
+  for _, pad in ipairs(pads) do
+    local okg, isPad = pcall(pad.isGamepad, pad)
+    if okg and isPad then return pad end
+  end
   return nil
+end
+
+function VRCS.input()
+  local pad = firstGamepad()
+  if not pad then return nil end
+
+  -- SDL's Y axes run +DOWN. The ctl table is in OpenXR's convention, +UP,
+  -- because that is what driveControls was written against -- it negates
+  -- moveY again on the way to the engine's lefty, and reads a positive lookY
+  -- as "zoom in". Getting this sign wrong inverts walking and zooming without
+  -- breaking anything loudly enough to notice.
+  return {
+    moveX =  axis(pad, "leftx"),
+    moveY = -axis(pad, "lefty"),
+    lookX =  axis(pad, "rightx"),
+    lookY = -axis(pad, "righty"),
+  }
 end
 
 -- OpenXR only: a floating quad layer for the flat UI.  Callers check

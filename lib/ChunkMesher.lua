@@ -1035,6 +1035,26 @@ local URGENT_SLICE = 0.012
 local IDLE_SLICE = 0.005
 local COVERED_SLICE = 0.030
 
+-- In a headset these are frame-time budgets larger than the frame.
+--
+-- On a monitor a 12 ms urgent slice buys a chunk in one go and costs a
+-- dropped frame nobody minds. At 90 Hz a frame is 11.1 ms, so the same slice
+-- guarantees a miss every time it is taken, and the compositor reprojects the
+-- previous frame instead -- which is felt, not seen: the walk stutters as
+-- though something keeps getting in the way. It also does this WHILE walking,
+-- because walking is what queues neighbour chunks.
+--
+-- Roughly a third of a frame for the map being walked into, an eighth for
+-- neighbours, and the covered slice stays generous because nothing visible
+-- can hitch behind a fade. Chunks then take several frames to appear rather
+-- than one, which is the right trade when the alternative is a judder the
+-- player feels in their inner ear.
+if love.xr ~= nil then
+  URGENT_SLICE = 0.004
+  IDLE_SLICE = 0.0015
+  COVERED_SLICE = 0.008
+end
+
 function ChunkMesher.pump(covered)
   if #jobs == 0 then return end
   local pick = jobs[1]

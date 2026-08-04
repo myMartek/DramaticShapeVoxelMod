@@ -97,6 +97,9 @@ local QUAD_DIORAMA = { pos = { 0, 0.1, -1.0 }, width = 0.8 }
 local QUAD_FP = { pos = { 0, 0, -1.4 }, width = 1.1 }
 
 local started = false           -- start() succeeded this enablement
+-- last "not yet" reported by a resumable backend, so the wait is logged
+-- once rather than every frame
+local waiting = nil
 local failed = nil              -- start() failed; wait for a re-toggle
 local wasOn = false
 local savedVsync = nil
@@ -411,8 +414,38 @@ local function renderWorld(views, ctl)
   end
   eyes.cx, eyes.cy = pivot[1], pivot[3]
 
+  -- TEMPORARY (visionOS port): units versus pixels, on every surface in the
+  -- eye path. The scene canvas measured the right SIZE while the picture
+  -- still filled only part of the eye, which is what a dpi scale other than 1
+  -- looks like. Remove with the vr-probe line in main.lua.
+  if not VR._loggedEyeSize then
+    VR._loggedEyeSize = true
+    local function dims(o)
+      local w, h, pw, ph = -1, -1, -1, -1
+      pcall(function()
+        w, h = o:getWidth(), o:getHeight()
+        pw, ph = o:getPixelWidth(), o:getPixelHeight()
+      end)
+      return ("%dx%d units / %dx%d px"):format(w, h, pw, ph)
+    end
+    local dpi = -1
+    pcall(function() dpi = love.graphics.getDPIScale() end)
+    print(("[vr-probe] dpi=%s flat=%dx%d view=%sx%s target: %s")
+      :format(tostring(dpi), vw, vh,
+              tostring(views[1].w), tostring(views[1].h), dims(eyes[1].target)))
+  end
+
   local okR, canvases = pcall(VoxelScene.render, ow, 0, 0, vw, vh,
                               VR.paletteFor, eyes)
+  if not VR._loggedCanvas and okR and type(canvases) == "table" and canvases[1] then
+    VR._loggedCanvas = true
+    local w, h, pw, ph = -1, -1, -1, -1
+    pcall(function()
+      w, h = canvases[1]:getWidth(), canvases[1]:getHeight()
+      pw, ph = canvases[1]:getPixelWidth(), canvases[1]:getPixelHeight()
+    end)
+    print(("[vr-probe] scene canvas: %dx%d units / %dx%d px"):format(w, h, pw, ph))
+  end
   if not (okR and type(canvases) == "table" and canvases[1] and canvases[2])
   then
     return false
@@ -696,8 +729,25 @@ function VR.update(dt)
     pcall(function() qw, qh = love.graphics.getPixelDimensions() end)
     if VRXR.start(qw, qh) then
       started = true
+      waiting = nil
       status = "session created"
       print("[DRAMATIC_SHAPE] VR: " .. VRXR.status())
+    elseif VRXR.resumable then
+      -- A backend whose session can come back on its own: a failed start is
+      -- "not yet", not "not ever", so it must not latch.
+      --
+      -- On visionOS the compositor layer exists only while the immersive
+      -- space is open, and the player opens and closes that with the Digital
+      -- Crown as a matter of course -- each re-entry brings a NEW layer.
+      -- Latching turned the Crown into a one-way door: VR read ON in the
+      -- settings, the mod had given up, and only toggling the row off and on
+      -- brought it back.
+      local why = VRXR.status()
+      if why ~= waiting then
+        waiting = why
+        print("[DRAMATIC_SHAPE] VR waiting: " .. why)
+      end
+      return
     else
       failed = VRXR.status()
       print("[DRAMATIC_SHAPE] VR unavailable: " .. failed
@@ -709,6 +759,12 @@ function VR.update(dt)
   if not VRXR.poll() then
     -- the runtime took the session away (headset off, runtime shut down)
     shutdown("session lost")
+    if VRXR.resumable then
+      -- Not a failure here: the space was closed, and the next start() picks
+      -- up the layer the next one brings.
+      waiting = nil
+      return
+    end
     failed = "session lost -- toggle VR off and on to retry"
     return
   end
