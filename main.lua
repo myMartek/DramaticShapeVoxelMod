@@ -476,6 +476,28 @@ local SETTINGS = {
     when = function() return VR.enabled() end, full = true },
 }
 
+-- TEMPORARY (visionOS port): why the VR row is or is not offered.
+--
+-- Whether the row exists is decided here, once, and on visionOS it was coming
+-- out false for reasons that took several wrong guesses to narrow down. This
+-- states every input to that decision rather than leaving it to be inferred.
+-- Remove once the port's VR path is confirmed working on device.
+;(function()
+  local xr = rawget(love, "xr")
+  local function ask(f)
+    if type(f) ~= "function" then return "n/a" end
+    local ok, v = pcall(f)
+    return ok and tostring(v) or "error"
+  end
+  print(("[vr-probe] love.xr=%s supported=%s available=%s state=%s backend=%s VR.supported=%s")
+    :format(xr ~= nil and "table" or "nil",
+            xr and ask(xr.supported) or "-",
+            xr and ask(xr.available) or "-",
+            xr and ask(xr.state) or "-",
+            ask(VR.backendKind),
+            ask(VR.supported)))
+end)()
+
 local schema = {}
 for _, entry in ipairs(SETTINGS) do
   -- the VR rows are absent from the mod manager's page too where the
