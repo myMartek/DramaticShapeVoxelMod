@@ -222,7 +222,10 @@ function VRCS.eyeCanvas(i)
   if not available() then return nil end
   local ok, canvas = pcall(love.xr.eyeCanvas, i)
   if not ok or not canvas then return nil end
-  return eyeScratch(i, canvas) or canvas
+  local scr = eyeScratch(i, canvas) or canvas
+
+
+  return scr
 end
 
 -- VRXR acquires and releases swapchain images around each eye.  Compositor
@@ -235,117 +238,44 @@ function VRCS.acquireEye(i)
   return canvas, canvas:getWidth(), canvas:getHeight()
 end
 
--- TEMPORARY (visionOS port): the eye map is taken on a SETTLED frame.
---
--- The first reading showed the top 45% of the canvas drawn and the rest
--- black, which looks like a broken vertical projection -- but it was frame
--- one, where the ground mesh does not exist yet, and "the terrain has not
--- been built" looks exactly the same from a colour sample. Nothing can be
--- concluded from that. This waits until the world has had a few seconds to
--- finish meshing, so a black lower half means the projection and not the
--- chunk queue.
 local releaseFrames = 0
-local MAP_AT_FRAME = 400
+local mapDestOnce = false
+local MAP_AT_FRAME = 120
 
 function VRCS.releaseEye(i)
   local src = scratch[i]
   local ok, dst = pcall(love.xr.eyeCanvas, i)
 
-  releaseFrames = releaseFrames + 1
-  local loggedRelease = releaseFrames ~= MAP_AT_FRAME
 
-  -- TEMPORARY (visionOS port): whether this path runs at all.
-  -- Every early return below is silent, and a silent skip looks exactly like
-  -- a blit that misses -- so "no green appeared" would say nothing.
-  if not loggedRelease then
-    loggedRelease = true
-    local function dims(o)
-      if not o then return "nil" end
-      local w, h, pw, ph = -1, -1, -1, -1
-      pcall(function()
-        w, h = o:getWidth(), o:getHeight()
-        pw, ph = o:getPixelWidth(), o:getPixelHeight()
-      end)
-      return ("%dx%d units / %dx%d px"):format(w, h, pw, ph)
-    end
-    print(("[vr-probe] releaseEye: available=%s scratch=%s drawable=%s same=%s")
-      :format(tostring(available()), dims(src), dims(ok and dst or nil),
-              tostring(src ~= nil and dst == src)))
-
-    -- The frustum this eye was given, and the shape it implies.
-    --
-    -- A vertical field of view that disagrees with the texture is the
-    -- remaining explanation for a horizontal cut, and it is one number away
-    -- from being settled: the tangent extents of the frustum, as an aspect,
-    -- must match the texture's. If they do, the projection is innocent and
-    -- the black half is content that was never drawn.
-    local v = views and views[1]
-    if v and v.fov then
-      local f = v.fov
-      local tw = math.tan(f.angleRight) - math.tan(f.angleLeft)
-      local th = math.tan(f.angleUp) - math.tan(f.angleDown)
-      print(("[vr-probe] fov L=%.4f R=%.4f U=%.4f D=%.4f | tan extent %.4f x %.4f")
-        :format(f.angleLeft, f.angleRight, f.angleUp, f.angleDown, tw, th))
-      print(("[vr-probe] frustum aspect=%.4f texture aspect=%.4f")
-        :format(tw / (th ~= 0 and th or 1), (v.w or 1) / (v.h or 1)))
-    end
-
-    -- WHERE the picture actually is, read off the eye itself.
-    --
-    -- Three explanations for the portrait patch have been measured and
-    -- disproved, and asking someone in a headset to describe a border is a
-    -- slow and lossy way to find a fourth. This reads the canvas back and
-    -- prints a coarse map of it: '#' where a pixel carries colour, '.' where
-    -- it is black. The shape of the drawn region is then a fact rather than a
-    -- description, and its edges say whether they fall at the flat view's
-    -- 9:16 or somewhere else entirely.
-    if src then
-      local okR, img = pcall(love.graphics.readbackTexture, src)
-      if okR and img then
-        local W, H = src:getPixelWidth(), src:getPixelHeight()
-        local COLS, ROWS = 24, 16
-        print(("[vr-probe] eye map %dx%d (# = drawn, . = black):"):format(W, H))
-        for r = 0, ROWS - 1 do
-          local line = {}
-          for c = 0, COLS - 1 do
-            local x = math.min(W - 1, math.floor((c + 0.5) * W / COLS))
-            local y = math.min(H - 1, math.floor((r + 0.5) * H / ROWS))
-            local okP, pr, pg, pb = pcall(img.getPixel, img, x, y)
-            local lit = okP and (pr + pg + pb) > 0.02
-            line[#line + 1] = lit and "#" or "."
-          end
-          print("[vr-probe] |" .. table.concat(line) .. "|")
-        end
-      else
-        print("[vr-probe] eye map: readback failed")
-      end
-    end
-  end
 
   if not src or not available() then return end
   if not ok or not dst or dst == src then return end
   pcall(function()
     love.graphics.setCanvas(dst)
+    -- setCanvas does NOT reset the transform stack or the scissor.
+    --
+    -- Whatever the game last pushed is still in force here, and this blit is
+    -- supposed to be a 1:1 copy of one texture onto another. With a scale or a
+    -- translate left active it lands smaller and offset instead: a correctly
+    -- rendered picture, shrunk into a corner of a black eye, slightly
+    -- different in each eye because the two are copied at different points in
+    -- the frame. Which is what the eye looked like, and why every measurement
+    -- of the SOURCE kept coming back correct -- the source was never the
+    -- problem.
+    love.graphics.origin()
+    love.graphics.setScissor()
     love.graphics.setShader()
     love.graphics.setDepthMode()
     love.graphics.setBlendMode("replace", "premultiplied")
-    -- TEMPORARY (visionOS port): the eye picture fills only a portrait patch
-    -- of the view, and three separate explanations for that have now been
-    -- measured and disproved (render size, world extent, dpi scale -- the
-    -- canvas is 2048x1984 units AND pixels, exactly the drawable). So mark
-    -- the parts of the compositor texture this blit does NOT cover.
-    --
-    -- The green clear that used to be here is gone: no green ever showed,
-    -- which means this blit covers the drawable completely and the black
-    -- borders are inside the SOURCE. The eye map above measures that
-    -- directly, and a green fill would have made every sample read as drawn.
     love.graphics.setColor(1, 1, 1, 1)
     -- Drawn from the bottom edge upward: this is the vertical mirror that
     -- undoes Voxel3D's clip-space flip, and it is the whole point of the
     -- scratch canvas.
     love.graphics.draw(src, 0, src:getHeight(), 0, 1, -1)
+
     love.graphics.setBlendMode("alpha")
     love.graphics.setCanvas()
+
   end)
 end
 

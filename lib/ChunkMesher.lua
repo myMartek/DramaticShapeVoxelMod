@@ -1050,9 +1050,15 @@ local COVERED_SLICE = 0.030
 -- than one, which is the right trade when the alternative is a judder the
 -- player feels in their inner ear.
 if love.xr ~= nil then
-  URGENT_SLICE = 0.004
-  IDLE_SLICE = 0.0015
-  COVERED_SLICE = 0.008
+  -- Tighter than the desktop's, but not starved. The first cut (4 / 1.5 / 8)
+  -- was aimed at the walk's judder and hit the wrong thing: an eye asks for
+  -- several times the world a flat screen does, so a mesher on a third of the
+  -- budget leaves visible holes in the world that never fill. Half a frame for
+  -- the map being walked into, and a generous covered slice because nothing
+  -- visible can hitch behind a fade.
+  URGENT_SLICE = 0.005
+  IDLE_SLICE = 0.002
+  COVERED_SLICE = 0.020
 end
 
 function ChunkMesher.pump(covered)

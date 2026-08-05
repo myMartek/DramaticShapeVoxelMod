@@ -285,6 +285,34 @@ end
 
 -- ------- the world, once per eye
 
+-- Whether the world could be drawn RIGHT NOW.
+--
+-- Split out of renderWorld because the answer has to be known BEFORE the
+-- session is claimed, not after. On CompositorServices, claiming stands the
+-- host's own renderer down -- so a mod that takes the frame loop before it can
+-- draw anything submits empty frames, and the player sits in a black space
+-- until the chunk queue catches up. That window is not small: the first map
+-- has to mesh, and this port deliberately runs a tighter meshing budget in a
+-- headset (lib/ChunkMesher.lua) precisely so it does not miss frames.
+--
+-- On OpenXR it never showed, because nothing stands down there -- the flat
+-- window keeps drawing and the headset simply shows black for a moment.
+local function worldRenderable()
+  local ok, Game = pcall(require, "src.core.Game")
+  local ow = ok and Game.overworld or nil
+  if not (ow and ow.map and ow.camera and Voxel.active()
+          and Voxel3D.available()) then
+    return false
+  end
+  -- The meshes themselves, not just the modules: VoxelScene.render returns
+  -- nil until the current map has terrain, and a nil frame is exactly the
+  -- empty submission this is here to prevent.
+  local okP, terrain = pcall(function()
+    return (VoxelScene.prefetch(ow))
+  end)
+  return okP and terrain ~= nil and terrain ~= false
+end
+
 local function renderWorld(views, ctl)
   local ok, Game = pcall(require, "src.core.Game")
   local ow = ok and Game.overworld or nil
@@ -414,38 +442,46 @@ local function renderWorld(views, ctl)
   end
   eyes.cx, eyes.cy = pivot[1], pivot[3]
 
-  -- TEMPORARY (visionOS port): units versus pixels, on every surface in the
-  -- eye path. The scene canvas measured the right SIZE while the picture
-  -- still filled only part of the eye, which is what a dpi scale other than 1
-  -- looks like. Remove with the vr-probe line in main.lua.
-  if not VR._loggedEyeSize then
-    VR._loggedEyeSize = true
-    local function dims(o)
-      local w, h, pw, ph = -1, -1, -1, -1
-      pcall(function()
-        w, h = o:getWidth(), o:getHeight()
-        pw, ph = o:getPixelWidth(), o:getPixelHeight()
-      end)
-      return ("%dx%d units / %dx%d px"):format(w, h, pw, ph)
-    end
-    local dpi = -1
-    pcall(function() dpi = love.graphics.getDPIScale() end)
-    print(("[vr-probe] dpi=%s flat=%dx%d view=%sx%s target: %s")
-      :format(tostring(dpi), vw, vh,
-              tostring(views[1].w), tostring(views[1].h), dims(eyes[1].target)))
+
+  -- Forced to identity for the eye pass regardless of what the flat frame
+  -- left behind. This pass measures in canvas pixels; anything the game had
+  -- pushed is meaningless here and can only shrink or shift it.
+  pcall(love.graphics.origin)
+  pcall(love.graphics.setScissor)
+
+  -- The world extent an EYE sees, not the one a Game Boy screen sees.
+  --
+  -- vw, vh are WORLD PIXELS: they say how much world this view covers, and
+  -- VoxelScene uses them to decide which chunks to ask ChunkMesher for. The
+  -- flat path passes 180x320, the size of the handheld's screen. An eye looks
+  -- at the same world through a 95-degree frustum and sees several times that
+  -- -- so everything outside the little 180x320 box was never REQUESTED, and
+  -- came out black with chunk-shaped edges. Turning your head while a map
+  -- loaded turned the black with it, because the hole is world-locked: that
+  -- is what finally identified it, after six measurements of the texture, the
+  -- transform and the blit all came back clean.
+  --
+  -- Derived, not guessed: keep the flat path's density of world pixels per
+  -- screen pixel (1080/180 = 6) and apply it to the eye texture. Voxel3D.cell
+  -- is exactly that ratio, so the sky's dither grid and the water's stay the
+  -- size they are on a flat screen instead of changing with the headset.
+  local rw, rh = vw, vh
+  if eyes[1].target and views[1].w and views[1].h then
+    local density = 6
+    pcall(function()
+      local sw = select(1, Game.renderer:worldViewSize())
+      local pw = love.graphics.getWidth()
+      if sw and sw > 0 and pw and pw > 0 then density = pw / sw end
+    end)
+    if density <= 0 then density = 6 end
+    rw = math.max(vw, math.floor(views[1].w / density))
+    rh = math.max(vh, math.floor(views[1].h / density))
   end
 
-  local okR, canvases = pcall(VoxelScene.render, ow, 0, 0, vw, vh,
+
+  local okR, canvases = pcall(VoxelScene.render, ow, 0, 0, rw, rh,
                               VR.paletteFor, eyes)
-  if not VR._loggedCanvas and okR and type(canvases) == "table" and canvases[1] then
-    VR._loggedCanvas = true
-    local w, h, pw, ph = -1, -1, -1, -1
-    pcall(function()
-      w, h = canvases[1]:getWidth(), canvases[1]:getHeight()
-      pw, ph = canvases[1]:getPixelWidth(), canvases[1]:getPixelHeight()
-    end)
-    print(("[vr-probe] scene canvas: %dx%d units / %dx%d px"):format(w, h, pw, ph))
-  end
+
   if not (okR and type(canvases) == "table" and canvases[1] and canvases[2])
   then
     return false
@@ -724,6 +760,15 @@ function VR.update(dt)
   wasOn = true
   if failed then return end
 
+  -- Nothing is claimed until there is something to show. See worldRenderable.
+  if not started and VRXR.resumable and not worldRenderable() then
+    if waiting ~= "world" then
+      waiting = "world"
+      print("[DRAMATIC_SHAPE] VR waiting: the world is still building")
+    end
+    return
+  end
+
   if not started then
     local qw, qh = 1024, 768
     pcall(function() qw, qh = love.graphics.getPixelDimensions() end)
@@ -795,6 +840,8 @@ function VR.update(dt)
   end
 
   local time, should = VRXR.waitFrame()
+
+
   if not time then return end
 
   -- the controllers, before the world renders: the frame the toggle
