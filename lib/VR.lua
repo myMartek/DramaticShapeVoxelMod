@@ -48,6 +48,7 @@ local Voxel3D = V.require("Voxel3D")
 local VoxelScene = V.require("VoxelScene")
 local FirstPerson = V.require("FirstPerson")
 local BattleCam = V.require("BattleCam")
+local Mat4 = V.require("Mat4")
 local VRRig = V.require("VRRig")
 -- Deliberately still called VRXR: every other reference in this file then
 -- needs no change at all.  What it now holds is whichever backend the
@@ -283,6 +284,133 @@ local function dexScreen()
   return ok and out or nil
 end
 
+-- Declared here because renderWorld below is compiled before the panel
+-- section defines it, and a local that is not yet in scope resolves to a nil
+-- global instead -- which took the whole voxel pipeline down with it.
+local updatePanel
+
+-- A MIPMAPPED copy of the UI layer, for a screen seen at an angle.
+--
+-- The device's screen is tilted 45 degrees away, so one axis of the texture is
+-- compressed hard against the pixel grid. Sampled with nearest and no mipmaps
+-- -- which is right for a flat 160x144 frame filling a monitor -- every edge
+-- lands on a different texel from one frame to the next and the whole readout
+-- shimmers.
+--
+-- Mipmaps plus anisotropy is what that asks for: minification takes a filtered
+-- level chosen per pixel, while MAGNIFICATION stays nearest so the art is
+-- still crisp squares when the device is close. Anisotropy is the part that
+-- matters at a slant -- an isotropic mip pick blurs the un-compressed axis
+-- just as much, which is legible but soft.
+--
+-- The copy is 160x144. Redrawing it once a frame is nothing, and it leaves the
+-- engine's own canvas untouched -- it is the flat screen's, and giving it
+-- mipmaps would change what every other reader of it gets.
+local uiMip = nil
+local function uiMipped(src)
+  if not src then return nil end
+  local w, h = src:getWidth(), src:getHeight()
+  if not (uiMip and uiMip:getWidth() == w and uiMip:getHeight() == h) then
+    if uiMip then pcall(uiMip.release, uiMip) end
+    local ok, c = pcall(love.graphics.newCanvas, w, h,
+                        { mipmaps = "manual", dpiscale = 1 })
+    if not ok then return src end
+    uiMip = c
+    -- LINEAR both ways, and the magnification is the one that matters here.
+    --
+    -- The screen is about 160 texels across and covers several hundred pixels
+    -- of view at reading distance, so it is MAGNIFIED, not minified. Nearest
+    -- magnification snaps each pixel to whichever texel its centre lands in --
+    -- and on a surface tilted 45 degrees away, the smallest head movement
+    -- moves that centre across a texel boundary. Every edge in the readout
+    -- then flips from one frame to the next. That is the flicker, and it is
+    -- why filtering the minification side changed nothing.
+    --
+    -- The cost is softer pixel edges up close. On a slanted screen the art is
+    -- never on the pixel grid anyway, so there was no crispness there to keep.
+    pcall(uiMip.setFilter, uiMip, "linear", "linear", 16)
+    pcall(uiMip.setMipmapFilter, uiMip, "linear")
+    pcall(uiMip.setWrap, uiMip, "clamp", "clamp")
+  end
+  local ok = pcall(function()
+    love.graphics.push("all")
+    love.graphics.setCanvas(uiMip)
+    love.graphics.origin()
+    love.graphics.setScissor()
+    love.graphics.setShader()
+    love.graphics.setDepthMode()
+    -- OPAQUE, and that is the actual fix for the shimmer.
+    --
+    -- The scene shader discards any texel with alpha below 0.5 -- right for
+    -- sprite sheets, where it keeps a transparent border out of the depth
+    -- buffer. The UI layer is transparent everywhere it drew nothing, so every
+    -- glyph and every box edge is an alpha edge, and on a screen tilted away
+    -- from the eye each of those flips between drawn and discarded as the
+    -- sampling point moves. That is the flicker; it is an alpha test, not a
+    -- colour filter, which is why mipmaps alone did nothing for it.
+    --
+    -- A screen is opaque anyway. Cleared to the Game Boy's own off-white, the
+    -- whole quad passes the test, nothing flips, and the mipmaps and
+    -- anisotropy below finally have plain colour to work on.
+    love.graphics.clear(0.94, 0.98, 0.91, 1)
+    love.graphics.setBlendMode("alpha")
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.draw(src, 0, 0)
+    love.graphics.setCanvas()
+    love.graphics.pop()
+  end)
+  if not ok then return src end
+  pcall(uiMip.generateMipmaps, uiMip)
+  return uiMip
+end
+
+-- Where the device sits when nobody is holding it: below the line of sight,
+-- turned back up toward the face.
+--
+-- 45 degrees down is the angle a thing you are reading actually sits at, and
+-- it keeps the device out of the view while walking -- a screen pinned in
+-- front of the eyes is the thing every headset UI gets wrong. HELD_DIST is
+-- reading distance, not arm's length: the device is small and its screen is
+-- 160x144.
+local HELD_PITCH = -math.pi / 4
+local HELD_DIST = 0.5
+
+-- Builds a hand-like pose from the head's, for Pokedex.place.
+--
+-- Only the HEADING carries over. A device that pitched and rolled with the
+-- head would swing under every glance and be unreadable -- and it is the head
+-- moving relative to it that has to do the reading, not the other way round.
+local function heldPose(head)
+  local q = head.quat
+  local R = Mat4.fromQuat(q[1], q[2], q[3], q[4])
+  -- R's third column is +Z; forward is its negation, flattened to the heading.
+  local fx, fz = -R[3], -R[11]
+  local flen = math.sqrt(fx * fx + fz * fz)
+  if flen < 1e-6 then fx, fz, flen = 0, -1, 1 end
+  fx, fz = fx / flen, fz / flen
+
+  -- Down the view by HELD_PITCH: forward shortens by the cosine, and the
+  -- device drops by the sine.
+  local cp, sp = math.cos(HELD_PITCH), math.sin(HELD_PITCH)
+  local pos = {
+    head.pos[1] + fx * HELD_DIST * cp,
+    head.pos[2] + HELD_DIST * sp,
+    head.pos[3] + fz * HELD_DIST * cp,
+  }
+
+  -- Facing the same heading, pitched back up so the screen looks at the face.
+  -- Ry(a) sends (0,0,-1) to (-sin a, 0, -cos a), which solves the heading;
+  -- the pitch is then a rotation about the turned X axis, composed as
+  -- quaternions so Pokedex.place's own TILT still applies on top.
+  local a = math.atan2(-fx, -fz)
+  local hy, hw = math.sin(a * 0.5), math.cos(a * 0.5)
+  local px, pw = math.sin(-HELD_PITCH * 0.5), math.cos(-HELD_PITCH * 0.5)
+  return {
+    pos = pos,
+    quat = { hw * px, hy * pw, -hy * px, hw * pw },
+  }
+end
+
 -- ------- the world, once per eye
 
 -- Whether the world could be drawn RIGHT NOW.
@@ -408,11 +536,34 @@ local function renderWorld(views, ctl)
   -- seat, where its screen is the fight's own 2D scene. The diorama
   -- does without: a hand-sized device hovering over a tabletop town is
   -- clutter, and the panel serves there. No hand tracked, no device.
+  --
+  -- ...unless there is no hand to track. A DualSense reports no pose at all,
+  -- and on that pad the device would simply never appear -- so one is HELD for
+  -- the player, at a fixed place below the line of sight. Reading it is then
+  -- the same gesture as reading a real one: glance down.
   local hand = ctl and ctl.handl or nil
+  if not hand and VRXR.hasQuadLayer == false then
+    hand = heldPose(views[1].pose)
+  end
   if hand and (battle or fp) then
     Pokedex.place(hand, pivot, anchor, scale, mountYaw)
     if uiShowing() then
-      local scr = dexScreen()
+      -- The engine's UI layer where there is no front buffer to read.
+      --
+      -- dexScreen copies the window's front buffer with raw GL, which exists
+      -- on Windows and nowhere else. The renderer's own canvas is the same
+      -- content and better: the 2D pass alone, at its native 160x144, already
+      -- transparent where it drew nothing -- so the device shows a menu rather
+      -- than a menu inside a picture of the world.
+      local scr = nil
+      if VRXR.hasQuadLayer == false then
+        local okG, Game = pcall(require, "src.core.Game")
+        local c = okG and Game.renderer and Game.renderer.canvas or nil
+        c = uiMipped(c)
+        if c then scr = { c, 0, 0, 1, 1 } end
+      else
+        scr = dexScreen()
+      end
       if scr then
         Pokedex.screen(scr[1], scr[2], scr[3], scr[4], scr[5])
       end
@@ -535,6 +686,12 @@ local function renderWorld(views, ctl)
   end
 
 
+  -- The panel, before the eyes draw it. Only where there is no composition
+  -- layer to submit it on; the layer path places it after the frame instead.
+  if VRXR.hasQuadLayer == false then
+    updatePanel(true, fp, views[1].pose, pivot, anchor, scale, mountYaw)
+  end
+
   local okR, canvases = pcall(VoxelScene.render, ow, 0, 0, rw, rh,
                               VR.paletteFor, eyes)
 
@@ -591,6 +748,49 @@ end
 local function wantQuad(worldUp)
   if not worldUp then return true end
   return uiShowing()
+end
+
+-- The panel, where the backend has no composition layer to submit it on.
+--
+-- Same question as updateQuad answers -- is the flat screen saying anything --
+-- and the same letterbox rect. What differs is only the destination: there is
+-- no quad to hand the runtime here, so the picture becomes a surface standing
+-- in the scene (lib/VRPanel.lua). Returns nil always, because nothing is
+-- submitted; the caller's endFrame has no layer to place.
+function updatePanel(worldUp, fp, pose, pivot, anchor, scale, yaw)
+  local VRPanel = V.require("VRPanel")
+  if not wantQuad(worldUp) then VRPanel.clear() return nil end
+  -- Same exemption as the quad path: where the pokedex is up and lit it IS
+  -- the screen, and a second copy floating beside it is clutter.
+  if Pokedex.frame and Pokedex.frame.tex then VRPanel.clear() return nil end
+
+  -- The engine's UI LAYER, not the finished frame.
+  --
+  -- This is what the OpenXR build effectively shows: the 2D pass on its own --
+  -- menus, dialogs, the battle screen -- at its native 160x144 and transparent
+  -- everywhere it drew nothing. The world is not in it.
+  --
+  -- The whole flat frame was the obvious thing to reach for and was wrong
+  -- twice over. It carries the world as well, so the panel showed a picture of
+  -- the scene it was standing in; and because that frame is where the panel is
+  -- composited on the flat path, the two fed each other into a tunnel of
+  -- receding copies. A layer that never contains the panel cannot do that.
+  --
+  -- No crop either: the canvas IS the frame, so the letterbox arithmetic the
+  -- quad path needs has nothing to cut here.
+  local tex = nil
+  pcall(function()
+    local okG, Game = pcall(require, "src.core.Game")
+    if okG and Game.renderer then tex = Game.renderer.canvas end
+  end)
+  -- The virtual screen is the fallback for an engine without that canvas.
+  if not tex and VRXR.screenTexture then tex = VRXR.screenTexture() end
+  if not tex then VRPanel.clear() return nil end
+
+  local u0, v0, u1, v1 = 0, 0, 1, 1
+
+  VRPanel.place(tex, u0, v0, u1, v1, pose, pivot, anchor, scale, yaw, fp)
+  return nil
 end
 
 local function updateQuad(worldUp, fp)
@@ -927,7 +1127,14 @@ function VR.update(dt)
       worldUp = renderWorld(views, ctl)
     end
   end
-  local quadPose = updateQuad(worldUp, FirstPerson.engaged())
+  -- Only the layer path runs here. The panel is placed inside renderWorld,
+  -- before the eyes draw, because it IS drawn by them -- placing it after
+  -- would show the previous frame's position, which on a surface that follows
+  -- the head is a visible lag.
+  local quadPose = nil
+  if VRXR.hasQuadLayer ~= false then
+    quadPose = updateQuad(worldUp, FirstPerson.engaged())
+  end
   VRXR.endFrame(time, worldUp or nil, quadPose)
 end
 

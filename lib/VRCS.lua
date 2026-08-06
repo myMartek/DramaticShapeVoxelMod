@@ -221,6 +221,18 @@ end
 -- a screen-space pass needs to address them: its fragment coordinate is
 -- already physical, so dividing by this gives the right UV directly and no
 -- rate-map conversion is involved at all.
+-- The flat frame, as a texture.
+--
+-- LOVE renders headless here, so the 2D UI is already sitting in an offscreen
+-- "virtual screen" -- no front-buffer read, no copy. VRXR has to go through
+-- raw GL for the same picture because on Windows it lives in a window.
+function VRCS.screenTexture()
+  if not available() or not love.xr.screenTexture then return nil end
+  local ok, tex = pcall(love.xr.screenTexture)
+  if not ok then return nil end
+  return tex
+end
+
 function VRCS.eyePhysicalSize(i)
   if not available() or not love.xr.eyePhysicalSize then return nil end
   local ok, w, h = pcall(love.xr.eyePhysicalSize, i)
@@ -306,7 +318,95 @@ local function firstGamepad()
   return nil
 end
 
+-- ------- hands
+--
+-- A PINCH ANCHORS A STICK. The moment thumb and finger meet, that point in
+-- space becomes the stick's centre; moving the hand away from it deflects the
+-- stick, and letting go recentres it. It reads like holding something, it
+-- needs no calibration, and it costs the player nothing to learn -- which
+-- matters, because there is no way to label a gesture on screen.
+--
+--   LEFT  index   walk        (the deflection is the direction and the speed)
+--   LEFT  middle  turn        (sideways only; this mod turns in snaps or a rate)
+--   RIGHT index   A
+--   RIGHT middle  B
+--   either fist   START
+--
+-- Buttons are edges, not levels: a pinch held while a menu opens must not keep
+-- pressing A. VRCS reports current and changed, and lib/VR.lua's driveControls
+-- already reads that pair.
+local HAND_STICK = 0.12   -- metres of travel for full deflection
+
+local held = { }          -- per gesture: the anchor point, while it is held
+local was = { }           -- last frame's state, for the edges
+
+local function stick(key, hand, on)
+  if not on then held[key] = nil return 0, 0 end
+  local p = hand.pose and hand.pose.pos
+  if not p then return 0, 0 end
+  if not held[key] then held[key] = { p[1], p[2], p[3] } return 0, 0 end
+  local a = held[key]
+  local dx = (p[1] - a[1]) / HAND_STICK
+  local dz = (p[3] - a[3]) / HAND_STICK
+  -- Forward is -Z, and the ctl table wants +Y forward.
+  local x = math.max(-1, math.min(1, dx))
+  local y = math.max(-1, math.min(1, -dz))
+  return x, y
+end
+
+local function edge(key, on)
+  local changed = (was[key] or false) ~= on
+  was[key] = on
+  return on, changed
+end
+
+local function handInput()
+  if not available() or not love.xr.hands then return nil end
+  local ok, hands = pcall(love.xr.hands)
+  if not ok or type(hands) ~= "table" then return nil end
+  local L, R = hands[1], hands[2]
+
+
+  if not ((L and L.tracked) or (R and R.tracked)) then return nil end
+
+  local ctl = {}
+
+  if L and L.tracked then
+    local mx, my = stick("walk", L, L.pinchIndex)
+    ctl.moveX, ctl.moveY = mx, my
+    -- Turning is sideways only: the vertical half of that gesture would
+    -- fight the zoom, and there is nothing else it should mean.
+    local tx = stick("turn", L, L.pinchMiddle)
+    ctl.lookX, ctl.lookY = tx, 0
+    ctl.handl = L.pose
+  else
+    held.walk, held.turn = nil, nil
+  end
+
+  if R and R.tracked then
+    ctl.a, ctl.aChanged = edge("a", R.pinchIndex == true)
+    ctl.b, ctl.bChanged = edge("b", R.pinchMiddle == true)
+    ctl.handr = R.pose
+    ctl.aimr = R.pose
+  else
+    ctl.a, ctl.aChanged = edge("a", false)
+    ctl.b, ctl.bChanged = edge("b", false)
+  end
+
+  -- A fist from either hand. Two hands can make one at once and that is still
+  -- one press, not two.
+  local fist = (L and L.tracked and L.fist) or (R and R.tracked and R.fist) or false
+  ctl.start, ctl.startChanged = edge("start", fist == true)
+
+  return ctl
+end
+
 function VRCS.input()
+  -- Hands first where they are tracked: someone who has put the pad down and
+  -- raised their hands means the hands.
+  local hands = handInput()
+  if hands then return hands end
+
   local pad = firstGamepad()
   if not pad then return nil end
 

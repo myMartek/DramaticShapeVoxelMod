@@ -249,8 +249,18 @@ end
 -- pose rotated by where the viewer actually stands -- walk behind an NPC
 -- and you see their back, circle to their flank and you see the profile,
 -- exactly as the four frames Gen 1 drew intend.
+-- A viewpoint that overrides the rig's for FACING decisions only.
+--
+-- Stereo needs one: apparentFacing sorts a pose into one of four quadrants
+-- around the viewer, and the two eyes stand at different points. A card near a
+-- quadrant boundary therefore falls on different sides for each eye and shows
+-- a different sprite in each -- an NPC facing two ways at once. The decision
+-- has to be made once for the frame, from a point between the eyes, and both
+-- eyes then draw the same card.
+FirstPerson.facingEye = nil
+
 function FirstPerson.apparentFacing(facing, wx, wz)
-  local eye = rig and rig.eye
+  local eye = FirstPerson.facingEye or (rig and rig.eye)
   local phi = FACING_ANGLE[facing]
   if not (eye and phi) then return facing end
   local dx, dz = eye[1] - wx, eye[3] - wz

@@ -1133,6 +1133,31 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     Voxel3D.glass(true)
   end
 
+  -- The flat screen as a surface, where the backend has no composition layer
+  -- to submit it on (lib/VRPanel.lua).
+  --
+  -- Outside the pokedex block, not inside it: that block only runs while the
+  -- device is in the player's hand, and VR.lua deliberately suppresses the
+  -- panel in exactly that case -- so nested there it could never draw at all.
+  -- Same prop treatment though: a drawing riding the scene, no wireframe and
+  -- no glass.
+  -- STEREO ONLY, and that is not an optimisation.
+  --
+  -- The panel wears the virtual screen, which is the flat frame -- and this
+  -- function renders that frame too. Drawn there, the panel paints itself into
+  -- the picture it is showing: the world beside the menu box is the flat
+  -- frame's world, which now contains a panel showing a world containing a
+  -- panel. That is the receding tunnel of copies, and it is a feedback loop,
+  -- not a transform bug.
+  local VRPanel = V.require("VRPanel")
+  if VoxelScene.stereo and VRPanel.active() then
+    Voxel3D.glass(false)
+    Voxel3D.seams(false)
+    VRPanel.draw()
+    Voxel3D.seams(true)
+    Voxel3D.glass(true)
+  end
+
   -- HORDE MODE's handgun, in the same slot and for the same reasons: a
   -- prop over the world with real depth, no wireframe and no glass. In VR
   -- it rides the tracked right hand (lib/VR placed it this frame); on the
@@ -1170,6 +1195,21 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   -- Marked for the water: its screen-space march reflects what is in THIS
   -- eye's picture, and the two eyes never hold the same picture.
   VoxelScene.stereo = true
+  -- One viewpoint for every facing decision this frame: the midpoint between
+  -- the eyes. Each eye still draws from its own position -- only the choice of
+  -- WHICH sprite a card wears is shared, and it has to be, or a pose near a
+  -- quadrant boundary faces two ways at once.
+  do
+    local a = eyes[1] and eyes[1].camera and eyes[1].camera.eye
+    local b = eyes[2] and eyes[2].camera and eyes[2].camera.eye
+    if a and b then
+      FirstPerson.facingEye = { (a[1] + b[1]) * 0.5,
+                                (a[2] + b[2]) * 0.5,
+                                (a[3] + b[3]) * 0.5 }
+    elseif a then
+      FirstPerson.facingEye = { a[1], a[2], a[3] }
+    end
+  end
   for i, eye in ipairs(eyes) do
     Voxel3D.camera = eye.camera
     if eye.adopt then FirstPerson.adoptVReye(eye.camera) end
@@ -1177,12 +1217,20 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
                               skyFor(state.map), eye.slot, eye.target,
                               eye.depth, eye.rateMap, eye.resolve,
                               eye.physW, eye.physH) then
+      -- Cleared on the way out too. Leaving it set meant the next FLAT frame
+      -- believed it was an eye and drew the panel into the virtual screen --
+      -- the very picture the panel wears -- which is the tunnel of receding
+      -- copies. A flag that is only cleared on the happy path is a flag that
+      -- is wrong exactly when something has already gone wrong.
+      VoxelScene.stereo = false
+      FirstPerson.facingEye = nil
       return nil
     end
     drawScene()
     out[i] = Voxel3D.endScene()
   end
   VoxelScene.stereo = false
+  FirstPerson.facingEye = nil
   return out
 end
 
