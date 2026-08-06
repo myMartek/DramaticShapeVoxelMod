@@ -1275,7 +1275,16 @@ function Water.begin(ctx)
   send("sunTexel", { texel, texel })
   send("dayTint", Voxel3D.tint or { 1, 1, 1 })
 
-  send("rays", level >= 2 and 1 or 0)
+  -- The screen-space march is OFF in stereo, whatever the row says.
+  --
+  -- It reflects the shoreline by walking the frame's own picture, so what it
+  -- finds is a property of one eye's view. The two eyes hold different
+  -- pictures, so they find different things and the surface carries a dark
+  -- patch that shifts with the head and disagrees between the eyes. There is
+  -- no per-eye version of the effect to synchronise -- a screen-space
+  -- reflection is monoscopic by construction. The sky reflection, the sun and
+  -- the moon are all view-independent and stay.
+  send("rays", (level >= 2 and not ctx.stereo) and 1 or 0)
   -- the horizon lean, and the direction it leans toward (see Water.lean)
   send("lookFlat", ctx.lookFlat or { 0, 0, -1 })
   send("lean", Water.lean(ctx.descent))

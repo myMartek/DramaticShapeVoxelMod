@@ -702,6 +702,7 @@ function VoxelScene.drawWater(draws, cast)
       reflect = mirror, depth = depth,
       rateMap = rateMap,
       physW = physW, physH = physH,
+      stereo = VoxelScene.stereo or false,
       vp = Voxel3D.vp, eye = Voxel3D.eye, curve = { Voxel3D.curveX or 0,
                                                     Voxel3D.curveZ or 0,
                                                     Voxel3D.curveK or 0 },
@@ -1166,6 +1167,9 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
   -- identity -- see FirstPerson) and leaves them leaning in the diorama,
   -- where the blend is zero.
   local out = {}
+  -- Marked for the water: its screen-space march reflects what is in THIS
+  -- eye's picture, and the two eyes never hold the same picture.
+  VoxelScene.stereo = true
   for i, eye in ipairs(eyes) do
     Voxel3D.camera = eye.camera
     if eye.adopt then FirstPerson.adoptVReye(eye.camera) end
@@ -1178,6 +1182,7 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     drawScene()
     out[i] = Voxel3D.endScene()
   end
+  VoxelScene.stereo = false
   return out
 end
 
