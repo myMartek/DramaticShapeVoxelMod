@@ -313,6 +313,38 @@ local function worldRenderable()
   return okP and terrain ~= nil and terrain ~= false
 end
 
+-- Whether this renderer's canvases store the frame upside down.
+--
+-- lib/Voxel3D.lua premultiplies a clip-space Y flip onto every projection,
+-- which is right for an OpenGL canvas and wrong for a Metal one -- the frame
+-- comes out mirrored and is turned back over at the very end. Anything that
+-- reasons in CANVAS ROWS is therefore inverted on Metal, and the sky's ray fan
+-- is exactly that: its v runs top-to-bottom across the canvas.
+--
+-- Kept here rather than in VRRig, which is deliberately platform-free and
+-- stays that way.
+local metalCanvases = nil
+local function canvasIsFlipped()
+  if metalCanvases == nil then
+    local ok, name = pcall(love.graphics.getRendererInfo)
+    metalCanvases = ok and name == "Metal"
+  end
+  return metalCanvases
+end
+
+-- Turn a sky ray fan over in v: the far end becomes the base and the step
+-- reverses. base + 1*dv is the v = 1 edge, so that is the new v = 0.
+local function flipSkyRay(ray)
+  if not (ray and ray.base and ray.dv) then return ray end
+  return {
+    base = { ray.base[1] + ray.dv[1],
+             ray.base[2] + ray.dv[2],
+             ray.base[3] + ray.dv[3] },
+    du = ray.du,
+    dv = { -ray.dv[1], -ray.dv[2], -ray.dv[3] },
+  }
+end
+
 local function renderWorld(views, ctl)
   local ok, Game = pcall(require, "src.core.Game")
   local ow = ok and Game.overworld or nil
@@ -427,13 +459,37 @@ local function renderWorld(views, ctl)
   local eyes = {}
   for i = 1, 2 do
     local v = views[i]
+    local target = VRXR.eyeCanvas and VRXR.eyeCanvas(i) or nil
+    local targetDepth = VRXR.eyeDepth and VRXR.eyeDepth(i) or nil
+    local rateMap = VRXR.rateMap and VRXR.rateMap(i) or nil
+    local pw, ph = nil, nil
+    if VRXR.eyePhysicalSize then pw, ph = VRXR.eyePhysicalSize(i) end
     eyes[i] = {
-      camera = VRRig.eyeCamera(v.pose, v.fov, pivot, anchor, scale, mountYaw),
-      w = v.w, h = v.h,
+      camera = (function()
+        local cam = VRRig.eyeCamera(v.pose, v.fov, pivot, anchor, scale, mountYaw)
+        -- The sun stays where it is when the head nods, instead of riding
+        -- along with it, once the fan agrees with the canvas it is read in.
+        if cam and cam.skyRay and canvasIsFlipped() then
+          cam.skyRay = flipSkyRay(cam.skyRay)
+        end
+        return cam
+      end)(),
+      -- visionOS lends a foveated intermediary whose reported dimensions are
+      -- logical screen pixels; its physical allocation is much smaller.
+      w = target and target:getWidth() or v.w,
+      h = target and target:getHeight() or v.h,
       slot = i == 1 and "vrL" or "vrR",
-      -- On CompositorServices the eye IS the compositor's texture, so the
-      -- scene renders where it will be read and the blit below never runs.
-      target = VRXR.eyeCanvas and VRXR.eyeCanvas(i) or nil,
+      -- OpenXR has no Canvas targets; CompositorServices supplies matching
+      -- foveated colour and readable depth intermediaries.
+      target = target,
+      depth = targetDepth,
+      rateMap = rateMap,
+      physW = pw, physH = ph,
+      -- Called by the water pass, which reads the frame in screen space and
+      -- therefore needs the de-foveated snapshot rather than the packed
+      -- attachments.
+      resolve = VRXR.resolveEye and function() return VRXR.resolveEye(i) end
+                or nil,
       -- the battle seat is a placed shot, not the first-person rig: the
       -- cards keep their stage lean rather than yawing at this eye, and
       -- the player's own card stays visible in it
@@ -820,6 +876,19 @@ function VR.update(dt)
     savedVsync = 1
     pcall(function() savedVsync = love.window.getVSync() end)
     pcall(love.window.setVSync, 0)
+    -- And the frame cap with it. waitFrame is the clock in a headset, so a
+    -- MAX FPS of 30 does not save power, it makes the compositor show every
+    -- submitted frame three times -- each one warped a little further to the
+    -- head's new pose. That reads as edges doubling while you turn, and it is
+    -- invisible in a screen recording because the recording captures the
+    -- frames, not the reprojections between them.
+    -- The HIGHEST step, not 0: normalize() snaps to the nearest valid step,
+    -- so 0 would come back as the lowest cap rather than no cap at all.
+    pcall(function()
+      local FrameCap = require("src.core.FrameCap")
+      local steps = FrameCap.STEPS
+      FrameCap.apply(steps[#steps])
+    end)
   end
 
   -- the battle camera holds still for as long as a headset is watching:

@@ -178,54 +178,60 @@ end
 
 local scratch = {}
 
-local function eyeScratch(i, model)
-  local w, h = model:getWidth(), model:getHeight()
-  local c = scratch[i]
-  if c and c:getWidth() == w and c:getHeight() == h then return c end
-  if c then pcall(c.release, c) end
-  -- dpiscale = 1 is NOT optional, and leaving it out is what made the eye a
-  -- portrait patch in a black field.
-  --
-  -- LOVE sizes a canvas in UNITS and multiplies by the dpi scale to get
-  -- pixels, so newCanvas(2048, 1984) on a display that reports a scale of 2
-  -- is 4096x3968 pixels while still answering 2048x1984 to getWidth(). The
-  -- scene then fills those pixels, and the 1:1 blit into a 2048-wide drawable
-  -- copies a corner of it. lib/PixelCanvas.lua pins the same value for the
-  -- same reason; this is a compositor texture measured in real pixels, and
-  -- units have to mean pixels here.
-  --
-  -- Same pixel format as the drawable too, so the copy is a copy and not a
-  -- silent colour-space conversion.
-  local ok, made = pcall(love.graphics.newCanvas, w, h,
-                         { format = model:getFormat(), dpiscale = 1 })
-  if not ok then
-    -- A driver that will not give us that format is not a reason to lose the
-    -- frame: fall back to the default and accept whatever conversion the
-    -- blit then does. dpiscale stays pinned.
-    ok, made = pcall(love.graphics.newCanvas, w, h, { dpiscale = 1 })
-  end
-  scratch[i] = ok and made or nil
-  return scratch[i]
-end
-
 -- Assigns the forward declaration at the top of the file.
 function dropScratch()
-  for i, c in pairs(scratch) do
-    pcall(c.release, c)
-    scratch[i] = nil
-  end
+  -- The native bridge owns these intermediary textures; Lua only forgets its
+  -- frame-local references when the compositor layer goes away.
+  for i in pairs(scratch) do scratch[i] = nil end
 end
 
--- The canvas this eye's scene renders into.  Not the compositor's texture
--- itself -- see above.
+-- A foveated intermediary: it reports logical screen dimensions to LÖVE, but
+-- physically contains only the fragments selected by the flipped gaze map.
 function VRCS.eyeCanvas(i)
   if not available() then return nil end
   local ok, canvas = pcall(love.xr.eyeCanvas, i)
   if not ok or not canvas then return nil end
-  local scr = eyeScratch(i, canvas) or canvas
+  scratch[i] = canvas
+  return canvas
+end
 
+function VRCS.eyeDepth(i)
+  if not available() or not love.xr.eyeDepth then return nil end
+  local ok, depth = pcall(love.xr.eyeDepth, i)
+  return ok and depth or nil
+end
 
-  return scr
+-- A conventional, de-foveated snapshot of this eye: normal textures with
+-- normal UVs, which is what a SCREEN-SPACE pass needs.
+--
+-- The packed attachments cannot be sampled by such a pass at all -- once
+-- variable rasterization is on, a logical UV is not a physical texture UV --
+-- and approximating the conversion through a 256x256 lookup was close enough
+-- near the gaze point and wrong everywhere else. Which is why neither
+-- orientation of that lookup made the water's occlusion correct: the
+-- approximation was the fault, not its direction.
+function VRCS.resolveEye(i)
+  if not available() or not love.xr.resolveEye then return nil end
+  local ok, colour, depth = pcall(love.xr.resolveEye, i)
+  if not ok then return nil end
+  return colour, depth
+end
+
+-- The physical size of this eye's packed attachments, which is the only thing
+-- a screen-space pass needs to address them: its fragment coordinate is
+-- already physical, so dividing by this gives the right UV directly and no
+-- rate-map conversion is involved at all.
+function VRCS.eyePhysicalSize(i)
+  if not available() or not love.xr.eyePhysicalSize then return nil end
+  local ok, w, h = pcall(love.xr.eyePhysicalSize, i)
+  if not ok or not w then return nil end
+  return w, h
+end
+
+function VRCS.rateMap(i)
+  if not available() or not love.xr.rateMap then return nil end
+  local ok, map = pcall(love.xr.rateMap, i)
+  return ok and map or nil
 end
 
 -- VRXR acquires and releases swapchain images around each eye.  Compositor
@@ -238,45 +244,12 @@ function VRCS.acquireEye(i)
   return canvas, canvas:getWidth(), canvas:getHeight()
 end
 
-local releaseFrames = 0
-local mapDestOnce = false
-local MAP_AT_FRAME = 120
-
 function VRCS.releaseEye(i)
   local src = scratch[i]
-  local ok, dst = pcall(love.xr.eyeCanvas, i)
-
-
-
   if not src or not available() then return end
-  if not ok or not dst or dst == src then return end
-  pcall(function()
-    love.graphics.setCanvas(dst)
-    -- setCanvas does NOT reset the transform stack or the scissor.
-    --
-    -- Whatever the game last pushed is still in force here, and this blit is
-    -- supposed to be a 1:1 copy of one texture onto another. With a scale or a
-    -- translate left active it lands smaller and offset instead: a correctly
-    -- rendered picture, shrunk into a corner of a black eye, slightly
-    -- different in each eye because the two are copied at different points in
-    -- the frame. Which is what the eye looked like, and why every measurement
-    -- of the SOURCE kept coming back correct -- the source was never the
-    -- problem.
-    love.graphics.origin()
-    love.graphics.setScissor()
-    love.graphics.setShader()
-    love.graphics.setDepthMode()
-    love.graphics.setBlendMode("replace", "premultiplied")
-    love.graphics.setColor(1, 1, 1, 1)
-    -- Drawn from the bottom edge upward: this is the vertical mirror that
-    -- undoes Voxel3D's clip-space flip, and it is the whole point of the
-    -- scratch canvas.
-    love.graphics.draw(src, 0, src:getHeight(), 0, 1, -1)
-
-    love.graphics.setBlendMode("alpha")
-    love.graphics.setCanvas()
-
-  end)
+  if love.xr.submitEye then
+    pcall(love.xr.submitEye, i, src)
+  end
 end
 
 function VRCS.endFrame()

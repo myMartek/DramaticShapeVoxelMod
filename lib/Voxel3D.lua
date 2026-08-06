@@ -286,6 +286,21 @@ local slots = {}
 local canvas, canvasW, canvasH = nil, 0, 0   -- the slot this pass bound
 local held = nil                             -- and the whole record for it
 local active = false
+local foveatedCopyShader = nil
+
+local function rateMappedCopyShader()
+  if foveatedCopyShader then return foveatedCopyShader end
+  if not (love.graphics and love.graphics.newShader) then return nil end
+  local ok, sh = pcall(love.graphics.newShader, [[
+uniform Image rateLookup;
+vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
+  vec2 physicalUV = Texel(rateLookup, tc).rg;
+  return Texel(tex, physicalUV) * color;
+}
+]])
+  if ok then foveatedCopyShader = sh end
+  return foveatedCopyShader
+end
 
 -- A READABLE depth canvas, so a later pass in the same frame can ask the
 -- buffer questions rather than only write to it -- which is the whole of
@@ -341,7 +356,8 @@ local function releaseSlot(slotHeld)
     -- A borrowed colour buffer belongs to whoever lent it -- on visionOS the
     -- compositor, which recycles its drawables.  Releasing one here would free
     -- a texture still in that rotation.
-    if not (key == "canvas" and slotHeld.borrowed) then
+    if not (key == "canvas" and slotHeld.borrowed)
+       and not (key == "depth" and slotHeld.borrowedDepth) then
       local obj = slotHeld[key]
       if obj and obj.release then pcall(obj.release, obj) end
     end
@@ -755,6 +771,19 @@ end
 -- window, before the depth mode is set, so the world draws over it.
 local discMesh = nil
 
+-- Whether this renderer stores canvases upside down relative to the row
+-- mapping below. See the note on the clip-space Y flip: it is right for an
+-- OpenGL canvas and wrong for a Metal one, where the frame is mirrored and
+-- only turned back at the end of the pipeline.
+local discFlip = nil
+local function discRowsFlipped()
+  if discFlip == nil then
+    local ok, name = pcall(love.graphics.getRendererInfo)
+    discFlip = ok and name == "Metal"
+  end
+  return discFlip
+end
+
 local function drawWorldDisc(w, h)
   local b = DayNight.body()
   if not (b and b.dy and b.dy > 0.005) then return end
@@ -782,16 +811,40 @@ local function drawWorldDisc(w, h)
   local verts = {}
   local corners = { { -1, -1, 0, 1 }, { 1, -1, 1, 1 },
                     { 1, 1, 1, 0 }, { -1, 1, 0, 0 } }
+  -- The body is a DIRECTION, and a direction used as a position sits one
+  -- world pixel from the world ORIGIN. An orbit camera looking at a diorama
+  -- never notices -- the origin is far off and the parallax is nil -- but a
+  -- camera standing INSIDE the world does: the disc gains parallax and swings
+  -- as the head moves, on a plane of its own while the banded sky behind it
+  -- stays put. So for the free-pitch cameras (VR's eyes and first person, the
+  -- ones that carry a ray fan) it is pushed out along that direction from the
+  -- EYE, which is what "at the horizon" means and leaves its angular size
+  -- untouched.
+  local ox, oy, oz, far = 0, 0, 0, 1
+  if Voxel3D.skyRayLive and Voxel3D.eye then
+    ox, oy, oz = Voxel3D.eye[1], Voxel3D.eye[2], Voxel3D.eye[3]
+    -- Well inside the far plane: VRRig clips at 400 m and first person runs
+    -- at 10 world px per metre.
+    far = 3000
+  end
   for i, c in ipairs(corners) do
-    local vx = b.dx + (rx * c[1] + ux * c[2]) * k
-    local vy = b.dy + (uy * c[2]) * k
-    local vz = b.dz + (rz * c[1] + uz * c[2]) * k
+    local vx = ox + (b.dx + (rx * c[1] + ux * c[2]) * k) * far
+    local vy = oy + (b.dy + (uy * c[2]) * k) * far
+    local vz = oz + (b.dz + (rz * c[1] + uz * c[2]) * k) * far
     local x = m[1] * vx + m[2] * vy + m[3] * vz
     local y = m[5] * vx + m[6] * vy + m[7] * vz
     local ww = m[13] * vx + m[14] * vy + m[15] * vz
     if ww <= 1e-6 then return end
-    verts[i] = { (x / ww * 0.5 + 0.5) * w, (y / ww * 0.5 + 0.5) * h,
-                 c[3], c[4] }
+    -- The disc is projected here on the CPU and drawn as a 2D mesh, so it
+    -- does not go through the rasterizer that the rest of the scene does and
+    -- does not inherit the clip-space Y flip's effect on where a row lands.
+    -- On Metal, under a free-pitch camera, the banded sky behind it is painted
+    -- from the ray fan in the canvas's own (mirrored) rows -- so without this
+    -- the two disagree in exactly one axis and the body slides up and down
+    -- with the head while the sky stays put.
+    local row = y / ww * 0.5 + 0.5
+    if Voxel3D.skyRayLive and discRowsFlipped() then row = 1 - row end
+    verts[i] = { (x / ww * 0.5 + 0.5) * w, row * h, c[3], c[4] }
   end
   pcall(function()
     if not discMesh then
@@ -816,10 +869,11 @@ end
 -- omitted is the free-roam world pass.
 -- `target` lets a caller supply the colour buffer instead of having one
 -- allocated here: on visionOS an eye is the compositor's own drawable texture,
--- so the scene renders where the compositor will read it and no per-eye copy
--- happens at all.  The depth buffer is still ours and still cached per slot --
--- the drawable rotates every frame, the depth does not have to.
-function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, target)
+-- so the scene can render into a native foveated intermediary. targetDepth is
+-- its matching readable physical-depth layout; both report logical screen
+-- dimensions to the shaders while the Metal rate map controls fragments.
+function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, target, targetDepth,
+                            targetRateMap, targetResolve, targetPhysW, targetPhysH)
   -- the wireframe variant when the player has it on AND it built; either
   -- answer falls through to the plain scene rather than to no scene
   local grid = VoxelGrid.enabled()
@@ -836,10 +890,23 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, target)
     -- compositor hands out its drawables in rotation.
     if not (slotHeld and slotHeld.w == w and slotHeld.h == h and slotHeld.borrowed) then
       if slotHeld then releaseSlot(slotHeld) end
-      slotHeld = { w = w, h = h, depth = newDepth(w, h), borrowed = true }
+      slotHeld = {
+        w = w, h = h,
+        depth = targetDepth or newDepth(w, h),
+        borrowed = true,
+        borrowedDepth = targetDepth ~= nil,
+      }
       slots[name] = slotHeld
     end
     slotHeld.canvas = target
+    slotHeld.rateMap = targetRateMap
+    slotHeld.resolve = targetResolve
+    slotHeld.physW = targetPhysW
+    slotHeld.physH = targetPhysH
+    if targetDepth then
+      slotHeld.depth = targetDepth
+      slotHeld.borrowedDepth = true
+    end
   elseif not (slotHeld and slotHeld.w == w and slotHeld.h == h and not slotHeld.borrowed) then
     local ok, c = PixelCanvas.new(w, h)
     if not ok then return false end
@@ -856,6 +923,10 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, target)
   -- the building wins, with no y-sorting anywhere
   local ok = pcall(love.graphics.setCanvas, depthTarget())
   if not ok and held.depth then
+    if held.borrowedDepth then
+      pcall(love.graphics.setCanvas)
+      return false
+    end
     -- the readable canvas would not bind; fall back to the internal buffer
     -- for the rest of this session rather than losing the whole 3D pass
     pcall(held.depth.release, held.depth)
@@ -1119,7 +1190,15 @@ function Voxel3D.beginWater(paint)
   -- frame rather than the frame composited against something
   love.graphics.setBlendMode("alpha", "premultiplied")
   love.graphics.setColor(1, 1, 1, 1)
+  if held.rateMap then
+    local copyShader = rateMappedCopyShader()
+    if copyShader then
+      love.graphics.setShader(copyShader)
+      pcall(copyShader.send, copyShader, "rateLookup", held.rateMap)
+    end
+  end
   love.graphics.draw(canvas)
+  love.graphics.setShader()
   love.graphics.setBlendMode("alpha")
   if paint and activeShader then
     love.graphics.setDepthMode("lequal", false)
@@ -1134,7 +1213,15 @@ function Voxel3D.beginWater(paint)
     pcall(love.graphics.setCanvas, depthTarget())
     return nil
   end
-  return held.mirror, held.depth
+  -- The PACKED depth, addressed in physical pixels.
+  --
+  -- Under variable rasterization the water's own fragment coordinate is
+  -- already physical, and so is this buffer -- so the two index each other
+  -- directly and no rate-map conversion belongs anywhere in between. What was
+  -- missing is only the divisor: love_ScreenSize reports the LOGICAL size, and
+  -- dividing a physical coordinate by it reaches roughly a third of the way
+  -- across the frame.
+  return held.mirror, held.depth, nil, held.physW, held.physH
 end
 
 -- Put the frame back: depth reattached, depth test and the scene shader as
@@ -1382,6 +1469,10 @@ function Voxel3D.invalidate()
   -- the VR sky's disc mesh belongs to this context like the canvases do
   if discMesh and discMesh.release then pcall(discMesh.release, discMesh) end
   discMesh = nil
+  if foveatedCopyShader and foveatedCopyShader.release then
+    pcall(foveatedCopyShader.release, foveatedCopyShader)
+  end
+  foveatedCopyShader = nil
   ShadowMap.invalidate()
   -- the sky is part of this pass and holds a shader of its own
   Sky.invalidate()

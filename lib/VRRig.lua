@@ -118,7 +118,21 @@ function VRRig.battleMount(eye, focus)
 end
 
 -- eye-space clip planes, in metres (see the unit note above)
-VRRig.NEAR = 0.05
+--
+-- NEAR is 0.15 rather than 0.05 because the depth BUFFER has to stay usable,
+-- not just the geometry. A GL-style depth buffer spends its precision near the
+-- near plane: at 0.05/400 the whole scene lands between 0.977 and 1.0
+-- (measured on device), and a tree 20 m away differs from water 21 m away by
+-- 1.2e-4 -- less than the 2e-4 slack the water's own depth test allows. The
+-- test then cannot reject anything and the water draws in front of everything,
+-- while nearby geometry, where the differences are still large, occludes it
+-- correctly. Which is exactly how it behaved.
+--
+-- 0.15 triples the usable precision and stays inside the clearance first
+-- person needs: FirstPerson's comment puts the eye within 2-3 world pixels of
+-- a wall face when sliding along it, and at FP_SCALE (10 px/m) that is 0.2-0.3
+-- m, still outside this plane.
+VRRig.NEAR = 0.15
 VRRig.FAR = 400
 
 -- ------- one eye's camera

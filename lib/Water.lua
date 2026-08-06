@@ -486,6 +486,27 @@ uniform vec3 dayTint;
 // nothing to land on. The frame copy is honest 8-bit colour and can stay.
 uniform Image reflectTex;
 uniform LOVE_HIGHP_OR_MEDIUMP Image depthTex;
+uniform Image rateLookup;
+uniform vec2 physSize;
+uniform float useRateLookup;
+
+float sceneDepthAt(vec2 logicalUV) {
+  vec2 uv = logicalUV;
+  if (useRateLookup > 0.5) {
+    // No flip here. The lookup table is built from the SAME flipped rate map
+    // the scene is rendered under, so the two already agree.
+    //
+    // A flip did sit here briefly and appeared to fix the water's occlusion.
+    // It was compensating for the final copy pass, which mirrored physical Y
+    // on the assumption that the flipped map is the exact mirror of the
+    // regular one -- untrue for an eye-tracked map. With that pass corrected
+    // to round-trip through logical space, the compensation became an error
+    // of its own and the depth test passed everywhere: water in front of
+    // everything.
+    uv = Texel(rateLookup, clamp(logicalUV, 0.0, 1.0)).rg;
+  }
+  return Texel(depthTex, uv).r;
+}
 
 uniform float rays;          // 0 = sky only, 1 = march the screen too
 uniform vec3 lookFlat;       // the way the horizon lies from this camera
@@ -723,7 +744,7 @@ vec4 march(vec3 origin, vec3 dir) {
     vec4 pb = project(b);
     if (pb.w < 0.5) return miss;
     if (pb.x < 0.0 || pb.x > 1.0 || pb.y < 0.0 || pb.y > 1.0) return miss;
-    float scene = Texel(depthTex, pb.xy).r;
+    float scene = sceneDepthAt(pb.xy);
     if (pb.z > scene) {
       // how much depth this one step covered: the yardstick for whether
       // the crossing is a surface or a thin thing the ray shot past
@@ -735,7 +756,7 @@ vec4 march(vec3 origin, vec3 dir) {
       for (int k = 0; k < RAY_REFINE; k++) {
         vec3 m = (lo + hi) * 0.5;
         vec4 pm = project(m);
-        if (pm.z > Texel(depthTex, pm.xy).r) { hi = m; } else { lo = m; }
+        if (pm.z > sceneDepthAt(pm.xy)) { hi = m; } else { lo = m; }
       }
       vec4 hit = project(hi);
       if (hit.w < 0.5) return miss;
@@ -979,10 +1000,15 @@ vec4 effect(mediump vec4 color, Image tex, mediump vec2 tc, mediump vec2 sc) {
   // like flat water with reflective seams. Anything GENUINELY in front of a
   // water pixel is whole world units nearer -- upward of 1e-3 in depth --
   // so 2e-4 clears the drift with room while still catching every occluder.
-  vec2 uv = sc / love_ScreenSize.xy;
+  // physSize is the PHYSICAL extent of the depth buffer when variable
+  // rasterization is on. sc is a physical fragment coordinate there, while
+  // love_ScreenSize reports the logical size -- dividing by that reached about
+  // a third of the way across and tested every water pixel against the wrong
+  // part of the frame. Zero means no foveation and the logical size is right.
+  vec2 uv = sc / (physSize.x > 0.5 ? physSize : love_ScreenSize.xy);
   vec4 selfC = vp * vec4(vBent, 1.0);
   float selfZ = selfC.z / selfC.w * 0.5 + 0.5;
-  if (selfZ > Texel(depthTex, uv).r + 2e-4) discard;
+  if (selfZ > sceneDepthAt(uv) + 2e-4) discard;
 
   // THE COLUMN THIS FRAGMENT IS LOOKING AT. Every water pixel is a bar of
   // its own standing a whole number of pixels tall, and the ray decides
@@ -1231,6 +1257,9 @@ function Water.begin(ctx)
   send("pxAngle", (ctx.fov or 1) / math.max(1, ctx.screen[2]))
   send("reflectTex", ctx.reflect)
   send("depthTex", ctx.depth)
+  send("physSize", { ctx.physW or 0, ctx.physH or 0 })
+  send("rateLookup", ctx.rateMap or ctx.depth)
+  send("useRateLookup", ctx.rateMap and 1 or 0)
 
   -- the sun's pass, sent the same way and for the same reason the scene
   -- shader sends it: the sampler is declared either way, and leaving one

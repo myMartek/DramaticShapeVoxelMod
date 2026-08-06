@@ -1943,7 +1943,13 @@ T.check(plain:find(
   "effect()'s own floats stay pinned to LOVE's prototype precision -- the "
   .. "Xclipse compiler reads a definition that drifted from the forward "
   .. "declaration as an illegal overload and refuses the whole shader")
-T.check(plain:find("sc / love_ScreenSize.xy", 1, true) ~= nil,
+-- The divisor gained a foveated branch for visionOS (physSize, the packed
+-- attachment's physical extent, which is the space sc is measured in once
+-- variable rasterization is on). The guarantee is unchanged and is what this
+-- asserts: the coordinate is normalised by a PIXEL size, never by `screen`,
+-- which counts canvas units and differs from pixels by the display density.
+T.check(plain:find("love_ScreenSize.xy", 1, true) ~= nil
+        and plain:find("sc / screen", 1, true) == nil,
   "the depth test normalises the pixel coord by the canvas's own pixel "
   .. "size -- `screen` counts canvas UNITS, and on a highdpi phone the two "
   .. "differ by the density, which clamped the lookup and cut the water "
@@ -1957,8 +1963,15 @@ T.check(plain:find("sc / love_ScreenSize.xy", 1, true) ~= nil,
 -- the world curve drops the far side of the map into the near field of view,
 -- and a sea a hundred and fifty tiles away came out rasterised on top of the
 -- pond at the player's feet, tall grass and all.
+-- The comparison moved behind sceneDepthAt() when the visionOS port taught
+-- this shader to sample through a foveated rate map, so this asserts the
+-- PROPERTY rather than the old wording: the self depth is still recomputed at
+-- high precision from vp, the scene depth still comes out of depthTex, and the
+-- slack is still there. Pinning the literal call made a behaviour-preserving
+-- refactor look like a regression.
 T.check(plain:find("vec4 selfC = vp * vec4(vBent, 1.0)", 1, true) ~= nil
-        and plain:find("Texel(depthTex, uv).r + 2e-4", 1, true) ~= nil,
+        and plain:find("sceneDepthAt(uv) + 2e-4", 1, true) ~= nil
+        and plain:find("Texel(depthTex, uv)", 1, true) ~= nil,
   "testing a HIGHP recomputed depth (gl_FragCoord.z is mediump on mobile "
   .. "GLES -- fp16 loses a self-comparison outright) with slack covering "
   .. "the buffer's screen-linear interpolation drift across big quads")

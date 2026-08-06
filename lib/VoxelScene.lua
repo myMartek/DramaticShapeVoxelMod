@@ -696,10 +696,12 @@ function VoxelScene.drawWater(draws, cast)
   end
   local plain = not curved
   if Water.enabled() and Voxel3D.depthReadable() then
-    local mirror, depth = Voxel3D.beginWater(cast)
+    local mirror, depth, rateMap, physW, physH = Voxel3D.beginWater(cast)
     local w, h = Voxel3D.size()
     local ok = mirror and depth and Water.begin({
       reflect = mirror, depth = depth,
+      rateMap = rateMap,
+      physW = physW, physH = physH,
       vp = Voxel3D.vp, eye = Voxel3D.eye, curve = { Voxel3D.curveX or 0,
                                                     Voxel3D.curveZ or 0,
                                                     Voxel3D.curveK or 0 },
@@ -1168,7 +1170,9 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     Voxel3D.camera = eye.camera
     if eye.adopt then FirstPerson.adoptVReye(eye.camera) end
     if not Voxel3D.beginScene(eye.w, eye.h, cx, cy, vw, vh,
-                              skyFor(state.map), eye.slot, eye.target) then
+                              skyFor(state.map), eye.slot, eye.target,
+                              eye.depth, eye.rateMap, eye.resolve,
+                              eye.physW, eye.physH) then
       return nil
     end
     drawScene()
