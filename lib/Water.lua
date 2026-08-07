@@ -396,6 +396,17 @@ Water.RAY_THICK = 1.6
 -- is still comfortably above any such difference. It is not a different bug on
 -- a different platform, it is the same test with no floor under it.
 Water.THICK_FLOOR = 2e-4
+
+-- How much of a hit survives at the END of the march. Tuned on the flat
+-- screen; raising it to 0.6 to chase the missing tree reflections changed
+-- nothing, so it is back where it was rather than carrying an unexplained
+-- adjustment into the PC build.
+Water.RAY_FAR_FLOOR = 0.15
+
+-- Depth at or past which the buffer is holding nothing but the far plane --
+-- the sky. A crossing there is not a surface to reflect, it is the end of the
+-- world, and the march steps over it instead of landing on it.
+Water.SKY_DEPTH = 0.999
 Water.EDGE_FADE = 0.14         -- reflection eased off over this much of the frame
 
 -- How much of a screen-space hit survives in STEREO, where the same hit may
@@ -426,6 +437,7 @@ Water.REFLECT_RATE = false
 --   1  the march's outcome, by exit -- see debugRays in the shader
 --   2  the depth buffer against project()'s own answer, red vs green
 --   3  the mirror the reflection is read out of, at this pixel's own place
+--   4  the reflection itself, raw -- no fade, no edge, no Fresnel
 -- false or nil to switch off.
 Water.DEBUG_RAYS = false
 
@@ -543,6 +555,13 @@ uniform vec2 physSize;
 uniform float useRateLookup;
 uniform float colorRate;
 uniform float rowFlip;
+uniform float farFloor;
+uniform float skyDepth;
+// Mode 1 alone paints the march's exits. It used to be "any debug mode", and
+// that made mode 4 -- which asks the march for the COLOUR it found -- get the
+// exit codes back instead, so it could only ever confirm what mode 1 already
+// said.
+#define exitMap (debugRays > 0.5 && debugRays < 1.5)
 // A COLOUR MAP OF THE MARCH, not a number.
 //
 // A fragment shader cannot hand back a statistic, but it can paint one. With
@@ -858,12 +877,12 @@ vec4 project(vec3 p) {
 vec4 debugExit(vec3 rgb) { return vec4(rgb, 1.0); }
 
 vec4 march(vec3 origin, vec3 dir) {
-  vec4 miss = (debugRays > 0.5) ? debugExit(vec3(0.0, 0.0, 1.0))
+  vec4 miss = (exitMap) ? debugExit(vec3(0.0, 0.0, 1.0))
                                 : vec4(0.0, 0.0, 0.0, 0.0);
   vec3 a = origin;
   vec4 pa = project(a);
   if (pa.w < 0.5) return miss;
-  if (debugRays > 0.5) miss = debugExit(vec3(1.0, 0.0, 0.0));
+  if (exitMap) miss = debugExit(vec3(1.0, 0.0, 0.0));
   float len = rayStep;
   for (int i = 0; i < RAY_STEPS; i++) {
     vec3 b = a + dir * len;
@@ -871,12 +890,28 @@ vec4 march(vec3 origin, vec3 dir) {
     if (pb.w < 0.5) return miss;
     if (pb.x < 0.0 || pb.x > 1.0 || pb.y < 0.0 || pb.y > 1.0) return miss;
     float scene = sceneDepthAt(pb.xy);
+    // THE SKY IS NOT A SURFACE. Nothing was drawn there, so the buffer holds
+    // the far plane, and a ray far enough out crosses it -- reporting a hit on
+    // something infinitely distant. That is how the lake came to mirror the
+    // sky through the reflection path as well as the sky path, and why raising
+    // the thickness floor made it worse rather than better: it stopped
+    // rejecting exactly these.
+    //
+    // Skipped rather than returned, so the ray CARRIES ON. Returning here
+    // would end the march at the first patch of sky it grazed -- which is the
+    // shoreline's own gap, just before the trees behind it.
+    if (scene >= skyDepth) {
+      a = b;
+      pa = pb;
+      len *= rayGrow;
+      continue;
+    }
     if (pb.z > scene) {
       // how much depth this one step covered: the yardstick for whether
       // the crossing is a surface or a thin thing the ray shot past
       float span = max(abs(pb.z - pa.z), thickFloor);
       if (pb.z - scene > span * rayThick)
-        return (debugRays > 0.5) ? debugExit(vec3(1.0, 0.55, 0.0)) : miss;
+        return (exitMap) ? debugExit(vec3(1.0, 0.55, 0.0)) : miss;
       // binary-refine onto the contact
       vec3 lo = a;
       vec3 hi = b;
@@ -900,8 +935,8 @@ vec4 march(vec3 origin, vec3 dir) {
       vec2 e = min(hit.xy, 1.0 - hit.xy);
       float edge = smoothstep(0.0, edgeFade, min(e.x, e.y));
       float far = 1.0 - clamp(float(i) / float(RAY_STEPS), 0.0, 1.0);
-      float believe = edge * (0.15 + 0.85 * far) * rayStrength;
-      if (debugRays > 0.5)
+      float believe = edge * (farFloor + (1.0 - farFloor) * far) * rayStrength;
+      if (exitMap)
         return debugExit(vec3(0.0, 0.15 + 0.85 * believe, 0.0));
       return vec4(sceneColorAt(hit.xy), believe);
     }
@@ -909,7 +944,7 @@ vec4 march(vec3 origin, vec3 dir) {
     pa = pb;
     len *= rayGrow;
   }
-  return (debugRays > 0.5) ? debugExit(vec3(0.35)) : miss;
+  return (exitMap) ? debugExit(vec3(0.35)) : miss;
 }
 
 // ------- the surface, as a field of pixel-tall columns
@@ -1232,6 +1267,22 @@ vec4 effect(mediump vec4 color, Image tex, mediump vec2 tc, mediump vec2 sc) {
   // live on different scales, and a march that compares them can only ever
   // cross too early, too late, or never -- which is exactly grey in the middle
   // and orange at the shore, with no hit anywhere.
+  // DEBUG 4: WHAT the march brought back, raw.
+  //
+  // The exit map says a ray landed; it does not say on what, and a hit on the
+  // grass and a hit on a tree are the same green. This paints the colour
+  // itself, with no distance fade, no edge fade and no Fresnel mixing it into
+  // the water underneath -- so whatever the reflection actually found is what
+  // the lake shows. Trees here and not in the finished picture means fading;
+  // no trees here means the ray never lands on them at all.
+  if (debugRays > 3.5) {
+    if (rays > 0.5) {
+      vec4 hit = march(surf, r);
+      return vec4(hit.a > 0.0 ? hit.rgb : vec3(0.0), 1.0) * color;
+    }
+    return vec4(0.0, 0.0, 0.0, 1.0) * color;
+  }
+
   // DEBUG 3: the MIRROR itself, at this pixel's own screen position, with the
   // march taken out of the question entirely.
   //
@@ -1252,7 +1303,7 @@ vec4 effect(mediump vec4 color, Image tex, mediump vec2 tc, mediump vec2 sc) {
   }
   if (rays > 0.5) {
     vec4 hit = march(surf, r);
-    if (debugRays > 0.5) return vec4(hit.rgb, 1.0) * color;
+    if (exitMap) return vec4(hit.rgb, 1.0) * color;
     refl = mix(refl, hit.rgb, hit.a);
   }
 
@@ -1422,6 +1473,8 @@ function Water.begin(ctx)
   send("rateLookup", ctx.rateMap or ctx.depth)
   send("useRateLookup", ctx.rateMap and 1 or 0)
   send("colorRate", (ctx.rateMap and Water.REFLECT_RATE) and 1 or 0)
+  send("skyDepth", Water.SKY_DEPTH)
+  send("farFloor", Water.RAY_FAR_FLOOR)
   send("rowFlip", GfxCaps.rowsFlipped() and 1 or 0)
   send("thickFloor", Water.THICK_FLOOR)
   send("debugRays", tonumber(Water.DEBUG_RAYS) or (Water.DEBUG_RAYS and 1 or 0))
