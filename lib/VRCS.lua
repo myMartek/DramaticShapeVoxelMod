@@ -360,8 +360,13 @@ local function edge(key, on)
   return on, changed
 end
 
+-- Deliberately NOT gated on available(). A compositor layer means "VR can
+-- present a frame", which is a different question from "the player's hands are
+-- being tracked" -- and tying the two meant the gestures were dead everywhere
+-- the flat screen is shown: the launcher window, and the space before the VR
+-- row is switched on. love.xr.hands starts tracking by itself now.
 local function handInput()
-  if not available() or not love.xr.hands then return nil end
+  if love.xr == nil or not love.xr.hands then return nil end
   local ok, hands = pcall(love.xr.hands)
   if not ok or type(hands) ~= "table" then return nil end
   local L, R = hands[1], hands[2]
@@ -400,6 +405,12 @@ local function handInput()
 
   return ctl
 end
+
+-- Also published on its own, because the flat screen wants the gestures
+-- WITHOUT the pad fallback underneath them: outside VR the pad already reaches
+-- the engine through LOVE's own joystick path, and answering it a second time
+-- here would drive every axis twice.
+VRCS.handInput = handInput
 
 function VRCS.input()
   -- Hands first where they are tracked: someone who has put the pad down and

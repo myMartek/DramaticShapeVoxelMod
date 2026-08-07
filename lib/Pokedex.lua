@@ -51,6 +51,40 @@ Pokedex.OFFSET = { 0, 0.04, -0.02 }
 Pokedex.TILT = -math.pi / 2      -- radians about X: 90 degrees forward,
                                  -- flush with the controller
 
+-- A turn about the body's OWN long axis, applied after the tilt.
+--
+-- A controller's grip and a bare hand's anchor do not agree about which way
+-- round the palm faces, so the attachment that put a controller's screen under
+-- the player's eyes leaves a hand's screen pointing off to one side. This is
+-- the correction, measured in the headset: a quarter turn overshot and put the
+-- screen past the player, an eighth lands it on them.
+--
+-- Innermost in the chain on purpose: everything before it has already put the
+-- slab where the hand is, and rotating last means rotating in the body's own
+-- coordinates, where Y is the device's height.
+Pokedex.SPIN = -math.pi / 4
+
+-- And then tipped forward about the body's own WIDTH axis: the top leans away
+-- from the player, so the screen looks up at the face instead of straight
+-- ahead. That is the angle a handheld is actually read at.
+--
+-- The body is authored front face +Z, and Mat4.rotateX carries +Y toward +Z,
+-- so a positive angle brings the top at the player. Forward is negative.
+Pokedex.PITCH = -math.pi / 4
+
+-- And then straight up, in metres, in the WORLD's up rather than the hand's.
+--
+-- A controller is held in a fist and the device sits above it; a bare hand is
+-- the thing itself, and at anything above a dim room's light it sits in front
+-- of its own screen. So the slab floats a hand's length over the palm instead
+-- of on it -- close enough to read as held, high enough that the fingers are
+-- below the body rather than across it.
+--
+-- World up, not OFFSET's hand-local up, because the point is to clear the hand
+-- whichever way the hand happens to be turned. OFFSET rides the wrist and
+-- would tip the device back down with it.
+Pokedex.LIFT = 0.15
+
 -- body proportions, in voxels
 local W, H, D = 9, 14, 2
 
@@ -176,10 +210,24 @@ Pokedex.frame = nil
 -- Stand the device on a tracked LEFT-HAND pose under the current
 -- XR-to-world mapping (the same pivot/anchor/scale/yaw the eyes got).
 function Pokedex.place(pose, pivot, anchor, scale, yaw)
+  -- LIFT goes in on the POSITION rather than onto the finished matrix:
+  -- propMatrix applies the hand's rotation last, so anything multiplied on
+  -- afterwards is in the hand's own axes. Moving the pose is the one place in
+  -- that chain where up still means up.
+  if Pokedex.LIFT and Pokedex.LIFT ~= 0 then
+    pose = { pos = { pose.pos[1], pose.pos[2] + Pokedex.LIFT, pose.pos[3] },
+             quat = pose.quat }
+  end
   local m = VRRig.propMatrix(pose, pivot, anchor, scale, yaw)
   m = Mat4.mul(m, Mat4.translate(Pokedex.OFFSET[1], Pokedex.OFFSET[2],
                                  Pokedex.OFFSET[3]))
   m = Mat4.mul(m, Mat4.rotateX(Pokedex.TILT))
+  if Pokedex.SPIN and Pokedex.SPIN ~= 0 then
+    m = Mat4.mul(m, Mat4.rotateY(Pokedex.SPIN))
+  end
+  if Pokedex.PITCH and Pokedex.PITCH ~= 0 then
+    m = Mat4.mul(m, Mat4.rotateX(Pokedex.PITCH))
+  end
   Pokedex.frame = { model = m }
 end
 

@@ -542,10 +542,20 @@ local function renderWorld(views, ctl)
   -- the player, at a fixed place below the line of sight. Reading it is then
   -- the same gesture as reading a real one: glance down.
   local hand = ctl and ctl.handl or nil
-  if not hand and VRXR.hasQuadLayer == false then
+  -- A MENU outside a fight and outside first person -- the title screen, the
+  -- options, anything the diorama is behind -- goes on the device too, and on
+  -- the HELD one even when a hand is being tracked.
+  --
+  -- Held rather than hand-mounted on purpose: a menu is read, not glanced at.
+  -- Following the wrist means the text moves while it is being read, and the
+  -- hand has to be held up for as long as the menu is open. The fixed place
+  -- below the line of sight is the pad's arrangement, and for a menu it is the
+  -- better one whether or not there is a hand to mount it on.
+  local menu = uiShowing() and not (battle or fp)
+  if (menu or not hand) and VRXR.hasQuadLayer == false then
     hand = heldPose(views[1].pose)
   end
-  if hand and (battle or fp) then
+  if hand and (battle or fp or menu) then
     Pokedex.place(hand, pivot, anchor, scale, mountYaw)
     if uiShowing() then
       -- The engine's UI layer where there is no front buffer to read.
@@ -999,9 +1009,78 @@ local function driveControls(ctl, dt, fp)
   end
 end
 
+-- ------- the hands, with VR switched off
+--
+-- The same gestures, driving the flat screen: the launcher window shows the
+-- game before anyone has entered the space, and inside the space the VR row
+-- can still be off. Both are states a player sits in, and in both of them
+-- raising a hand did nothing at all.
+--
+-- Narrower than driveControls on purpose. What survives the flat screen is
+-- exactly the four things it has a meaning for -- A, B, START and the walk --
+-- and the rest of that function is about a rig that is not running here: the
+-- snap turn, the zoom, the height grab and the VOXEL ladder all move state
+-- the flat renderer never reads, so driving them from here would be writing
+-- into the dark.
+--
+-- Silent whenever no hand is tracked, rather than releasing every frame: the
+-- pad and the keyboard own these same buttons while the hands are down, and a
+-- release per frame would take every press away from them again. The one
+-- release happens on the way down, once.
+local flatHeld = false
+
+local function driveFlat()
+  if not VRXR.handInput then return end
+  local ok, ctl = pcall(VRXR.handInput)
+  if not ok then return end
+
+  if not ctl then
+    if flatHeld then
+      flatHeld = false
+      releaseInputs()
+    end
+    return
+  end
+  flatHeld = true
+
+  local okG, Game = pcall(require, "src.core.Game")
+  if not (okG and Game.input) then return end
+  local inp = Game.input
+  setGB(inp, "a", ctl.a)
+  setGB(inp, "b", ctl.b)
+  setGB(inp, "start", ctl.start)
+  -- OpenXR's +Y is up; the engine's lefty is +down. Same negation
+  -- driveControls makes, for the same reason.
+  inp:gamepadaxis(nil, "leftx", ctl.moveX or 0)
+  inp:gamepadaxis(nil, "lefty", -(ctl.moveY or 0))
+end
+
 -- ------- the per-frame drive
+--
+-- Split in two so the hands cannot fall down a crack. updateRig returns true
+-- only on the path that actually reached driveControls; every other way out --
+-- and there are eleven of them -- is a frame where the rig drove nothing, and
+-- the flat screen is what the player is looking at.
+--
+-- That distinction is the whole bug this split fixes. VR read ON in the
+-- settings from the last session, so update() went down the VR branch and sat
+-- in "the world is still building" with no immersive space to claim, while the
+-- flat drive lived on the OFF branch and was never reached. Switched on, no
+-- session, flat picture, dead hands.
+
+local updateRig
 
 function VR.update(dt)
+  if updateRig(dt) then
+    -- the rig drove this frame, so the flat path must not press the same
+    -- button behind it -- and must not release it either
+    flatHeld = false
+    return
+  end
+  driveFlat()
+end
+
+function updateRig(dt)
   local on = VR.enabled()
   if not on then
     if wasOn then
@@ -1009,7 +1088,7 @@ function VR.update(dt)
       failed = nil
     end
     wasOn = false
-    return
+    return false
   end
 
   if not wasOn then failed = nil end   -- a fresh toggle earns a fresh try
@@ -1136,6 +1215,7 @@ function VR.update(dt)
     quadPose = updateQuad(worldUp, FirstPerson.engaged())
   end
   VRXR.endFrame(time, worldUp or nil, quadPose)
+  return true
 end
 
 -- ------- the window while a headset owns the picture
