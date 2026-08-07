@@ -412,26 +412,190 @@ end
 -- here would drive every axis twice.
 VRCS.handInput = handInput
 
+-- ------- what the hardware actually reports
+--
+-- A Sense controller has ONE thumbstick, which GameController names
+-- GCInputThumbstick -- neither the left one nor the right one. SDL gives these
+-- devices a gamepad mapping and then leaves its NAMED axes empty, so reading
+-- "leftx" off one is how walking came to do nothing at all. The device is
+-- therefore asked rather than assumed, and the whole raw vector is reported
+-- including the axes sitting still: a resting axis that is not at zero is what
+-- makes a bad mapping walk the player in one direction for ever.
+--
+-- To a FILE as well as the console, because a --console launch only exists
+-- while it is attached, and attaching one means killing whatever session is
+-- being measured.
+-- Whatever SDL currently has, named, once per change.
+local padsSeen = nil
+
+local function logPads(pads)
+  local names = {}
+  for _, pad in ipairs(pads) do
+    local okn, n = pcall(pad.getName, pad)
+    local okg, isPad = pcall(pad.isGamepad, pad)
+    local oka, ax = pcall(pad.getAxisCount, pad)
+    local okb, bt = pcall(pad.getButtonCount, pad)
+    names[#names + 1] = string.format("%s (gamepad=%s axes=%d buttons=%d)",
+      (okn and n) or "?", tostring(okg and isPad), (oka and ax) or -1,
+      (okb and bt) or -1)
+  end
+  local line = #names > 0 and table.concat(names, " | ") or "none"
+  if line ~= padsSeen then
+    padsSeen = line
+    print("[DRAMATIC_SHAPE] SDL joysticks: " .. line)
+  end
+end
+
+local GP_AXES = { "leftx", "lefty", "rightx", "righty",
+                  "triggerleft", "triggerright" }
+local axisSeen = {}
+local axisLines = {}
+
+local function logAxes(pads)
+  for i, pad in ipairs(pads) do
+    local okc, n = pcall(pad.getAxisCount, pad)
+    local raw = {}
+    for a = 1, (okc and n) or 0 do
+      local ok, v = pcall(pad.getAxis, pad, a)
+      raw[a] = (ok and type(v) == "number") and v or 0
+    end
+    local named = {}
+    for _, name in ipairs(GP_AXES) do
+      local ok, v = pcall(pad.getGamepadAxis, pad, name)
+      if ok and type(v) == "number" and math.abs(v) > 0.2 then
+        named[#named + 1] = string.format("%s=%.2f", name, v)
+      end
+    end
+
+    local prev = axisSeen[i]
+    local moved = prev == nil
+    if not moved then
+      for a = 1, #raw do
+        if math.abs(raw[a] - (prev[a] or 0)) > 0.2 then moved = true break end
+      end
+    end
+    if moved then
+      axisSeen[i] = raw
+      local parts = {}
+      for a = 1, #raw do parts[a] = string.format("%d:%+.2f", a, raw[a]) end
+      local line = string.format("pad %d raw %s%s", i,
+        table.concat(parts, " "),
+        #named > 0 and ("  named " .. table.concat(named, " ")) or "")
+      print("[DRAMATIC_SHAPE] " .. line)
+      axisLines[#axisLines + 1] = line
+      if #axisLines > 400 then table.remove(axisLines, 1) end
+      pcall(love.filesystem.write, "vr_axes.log",
+            table.concat(axisLines, "\n") .. "\n")
+    end
+  end
+end
+
+-- ------- the Sense controllers
+--
+-- Two halves from two places, and that split is the whole design.
+--
+-- The BUTTONS come from the pad SDL already enumerates: these are recognised
+-- gamepads, so their presses reach the engine through LOVE's own
+-- gamepadpressed path exactly as a DualSense's do. Nothing here repeats that,
+-- because pressing every button twice is worse than not reading it once.
+--
+-- The POSES come from ARKit's accessory tracking, because GameController has
+-- none: love.xr.accessories reports the GRIP of whichever controller is in
+-- which hand. That is the same shape love.xr.hands answers in, so the pokedex
+-- and the gun are placed by exactly the code that already places them on a
+-- bare hand -- the source of the pose changes and nothing downstream does.
+local function accessoryPoses()
+  if love.xr == nil or not love.xr.accessories then return nil end
+  local ok, pads = pcall(love.xr.accessories)
+  if not ok or type(pads) ~= "table" then return nil end
+  local L, R = pads[1], pads[2]
+  local lp = (L and L.tracked) and L.pose or nil
+  local rp = (R and R.tracked) and R.pose or nil
+  if not (lp or rp) then return nil end
+  return { lp, rp }
+end
+
+-- The Sense thumbsticks, straight from GameController.
+--
+-- Not through SDL: it enumerates these controllers, calls them gamepads, and
+-- then leaves every named axis at zero. That was measured rather than assumed
+-- -- 269 samples in which leftx, lefty, rightx and righty never left the
+-- centre while the trigger and the grip moved freely. The analogue reading
+-- only exists on GameController's own GCInputThumbstick, so love.xr.sticks
+-- reads it there and hands it over already sorted by chirality.
+local function xrSticks()
+  if love.xr == nil or not love.xr.sticks then return nil end
+  local ok, st = pcall(love.xr.sticks)
+  if not ok or type(st) ~= "table" then return nil end
+  local L, R = st[1] or { 0, 0 }, st[2] or { 0, 0 }
+  local function dz(v)
+    v = tonumber(v) or 0
+    return math.abs(v) < DEADZONE and 0 or v
+  end
+  return dz(L[1]), dz(L[2]), dz(R[1]), dz(R[2])
+end
+
+-- STICKS ONLY -- see the buttons note above.
+local function padSticks()
+  local ok, pads = pcall(love.joystick.getJoysticks)
+  if not ok or type(pads) ~= "table" then return nil end
+  pcall(logPads, pads)
+  pcall(logAxes, pads)
+
+  local list = {}
+  for _, p in ipairs(pads) do
+    local okg, isPad = pcall(p.isGamepad, p)
+    if okg and isPad then list[#list + 1] = p end
+  end
+  if #list == 0 then return nil end
+
+  -- ONE pad: a DualSense, both sticks on the one device.
+  if #list < 2 then
+    local pad = list[1]
+    return {
+      moveX =  axis(pad, "leftx"),
+      moveY = -axis(pad, "lefty"),
+      lookX =  axis(pad, "rightx"),
+      lookY = -axis(pad, "righty"),
+    }
+  end
+
+  -- TWO: a Sense pair, one stick each, and neither of them on an SDL axis.
+  -- GameController's Y already runs +UP, which is the ctl table's own
+  -- convention, so unlike SDL's there is nothing to negate here.
+  local lx, ly, rx, ry = xrSticks()
+  if lx == nil then return nil end
+  return { moveX = lx, moveY = ly, lookX = rx, lookY = ry }
+end
+
 function VRCS.input()
-  -- Hands first where they are tracked: someone who has put the pad down and
-  -- raised their hands means the hands.
+  -- The Sense pair, where it is being tracked.
+  --
+  -- Ahead of the hands, and this is the one ordering that matters here: a
+  -- Sense controller is HELD, so hand tracking sees the hand holding it and
+  -- would answer first -- with a pinch that the fist around the grip is
+  -- already making. The controller wins whenever it has a pose.
+  local poses = accessoryPoses()
+  if poses then
+    local ctl = padSticks() or {}
+    ctl.handl, ctl.handr = poses[1], poses[2]
+    -- Aim and grip are the same pose here. The distinction only pays for the
+    -- gun, and until that is measured on this hardware, pointing along the
+    -- grip is the honest answer rather than a guessed offset.
+    ctl.aimr = poses[2]
+    -- Where the pose came from, for whoever hangs something off it: a
+    -- controller's GRIP and a bare hand's anchor hold an object differently,
+    -- and lib/Pokedex.lua has a correction for each.
+    ctl.poseKind = "grip"
+    return ctl
+  end
+
+  -- Then the bare hands: someone who has put the pad down and raised their
+  -- hands means the hands.
   local hands = handInput()
   if hands then return hands end
 
-  local pad = firstGamepad()
-  if not pad then return nil end
-
-  -- SDL's Y axes run +DOWN. The ctl table is in OpenXR's convention, +UP,
-  -- because that is what driveControls was written against -- it negates
-  -- moveY again on the way to the engine's lefty, and reads a positive lookY
-  -- as "zoom in". Getting this sign wrong inverts walking and zooming without
-  -- breaking anything loudly enough to notice.
-  return {
-    moveX =  axis(pad, "leftx"),
-    moveY = -axis(pad, "lefty"),
-    lookX =  axis(pad, "rightx"),
-    lookY = -axis(pad, "righty"),
-  }
+  return padSticks()
 end
 
 -- OpenXR only: a floating quad layer for the flat UI.  Callers check

@@ -4573,6 +4573,55 @@ end)()
   end
 end)()
 
+-- ------- the renderer question, asked in exactly one place
+--
+-- The clip-space Y flip is right for OpenGL and wrong for Metal, and the mod
+-- lives with that by compensating wherever it surfaces. Four bugs came out of
+-- it -- the water, the sky ray, the sun and moon, the shadow map -- and each
+-- fix arrived carrying its own private `getRendererInfo() == "Metal"`.
+--
+-- Four copies of one fact can drift, and a fifth site can simply forget to
+-- ask. So the fact belongs to lib/GfxCaps.lua and nowhere else, and that is
+-- the kind of rule a comment does not enforce. Text, because the property
+-- being checked IS a property of the text: nothing is called here.
+;(function()
+  local function read(path)
+    local fh = io.open(path, "r")
+    if not fh then return nil end
+    local src = fh:read("*a")
+    fh:close()
+    return src
+  end
+
+  local caps = read(MOD_PATH .. "/lib/GfxCaps.lua")
+  T.eq(caps ~= nil, true, "GfxCaps source is readable")
+  T.eq(caps and caps:find("getRendererInfo", 1, true) ~= nil, true,
+       "GfxCaps is the one that asks the renderer")
+
+  local offenders = {}
+  local dir = io.popen('ls "' .. MOD_PATH .. '/lib" 2>/dev/null')
+  if dir then
+    for name in dir:lines() do
+      if name:match("%.lua$") and name ~= "GfxCaps.lua" then
+        local src = read(MOD_PATH .. "/lib/" .. name)
+        -- Comments may name it; code may not. Strip the line comments first,
+        -- because the note explaining WHY this rule exists mentions it.
+        if src then
+          src = src:gsub("%-%-[^\n]*", "")
+          if src:find("getRendererInfo", 1, true) then
+            offenders[#offenders + 1] = name
+          end
+        end
+      end
+    end
+    dir:close()
+  end
+  table.sort(offenders)
+  T.eq(#offenders, 0,
+    "only GfxCaps asks getRendererInfo; also asking: "
+    .. table.concat(offenders, ", "))
+end)()
+
 Pipelines.reset()
 run.release()
 

@@ -25,6 +25,7 @@
 -- the mod namespace (see main.lua): V.require loads a sibling module
 local V = ...
 
+local GfxCaps = V.require("GfxCaps")
 local Mat4 = V.require("Mat4")
 local Voxel = V.require("VoxelState")
 local ShadowMap = V.require("ShadowMap")
@@ -771,18 +772,6 @@ end
 -- window, before the depth mode is set, so the world draws over it.
 local discMesh = nil
 
--- Whether this renderer stores canvases upside down relative to the row
--- mapping below. See the note on the clip-space Y flip: it is right for an
--- OpenGL canvas and wrong for a Metal one, where the frame is mirrored and
--- only turned back at the end of the pipeline.
-local discFlip = nil
-local function discRowsFlipped()
-  if discFlip == nil then
-    local ok, name = pcall(love.graphics.getRendererInfo)
-    discFlip = ok and name == "Metal"
-  end
-  return discFlip
-end
 
 local function drawWorldDisc(w, h)
   local b = DayNight.body()
@@ -843,7 +832,7 @@ local function drawWorldDisc(w, h)
     -- the two disagree in exactly one axis and the body slides up and down
     -- with the head while the sky stays put.
     local row = y / ww * 0.5 + 0.5
-    if Voxel3D.skyRayLive and discRowsFlipped() then row = 1 - row end
+    if Voxel3D.skyRayLive and GfxCaps.rowsFlipped() then row = 1 - row end
     verts[i] = { (x / ww * 0.5 + 0.5) * w, row * h, c[3], c[4] }
   end
   pcall(function()

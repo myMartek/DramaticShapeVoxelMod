@@ -27,6 +27,7 @@
 -- the mod namespace (see main.lua): V.require loads a sibling module
 local V = ...
 
+local GfxCaps = V.require("GfxCaps")
 local Mat4 = V.require("Mat4")
 local Voxel = V.require("VoxelState")
 
@@ -165,6 +166,25 @@ local TO_UNIT = { 0.5, 0, 0, 0.5,
                   0, 0, 0.5, 0.5,
                   0, 0, 0, 1 }
 
+-- The same, with v turned over, for renderers whose canvas rows run the other
+-- way from OpenGL's.
+--
+-- This map is WRITTEN by the rasteriser and READ by arithmetic, and only the
+-- writer knows which row a clip-space y lands in. On OpenGL the two agree. On
+-- Metal a render target is top-left origin, so the fill pass puts a caster in
+-- row R and this matrix goes looking in row res-R -- where there is usually
+-- nothing at all, hence no shadow under a tree or an NPC, and one enormous
+-- one wherever the mirrored half happens to hold the terrain's silhouette.
+--
+-- The fix belongs HERE and not in the projection: clipVP has to keep matching
+-- what the fill pass rasterises with. Only the reader is wrong.
+local TO_UNIT_FLIPPED = { 0.5, 0, 0, 0.5,
+                          0, -0.5, 0, 0.5,
+                          0, 0, 0.5, 0.5,
+                          0, 0, 0, 1 }
+
+
+
 -- world -> light clip space, for the pass that FILLS the map
 ShadowMap.clipVP = IDENTITY
 -- world -> the unit cube, for the pass that READS it
@@ -221,7 +241,18 @@ end
 -- where the canvas cannot be made -- VoxelScene then keeps the flat decal
 -- shadows, which need nothing but a quad.
 function ShadowMap.available()
-  if love.system and love.system.getOS and love.system.getOS() == "iOS" then
+  -- iOS is out, and visionOS is NOT iOS however loudly it says so.
+  --
+  -- love.system.getOS() answers "iOS" on visionOS deliberately -- the engine
+  -- port wanted every existing iOS branch, and for dpiscale and the flat
+  -- window that was right. Here it is wrong: this test was about a phone's
+  -- thermal budget, and a Vision Pro is not one. Switched off, the mod falls
+  -- back to flat decal shadows, and the difference against the PC build is
+  -- exactly the "light and shadows" a player notices first.
+  --
+  -- love.xr is the discriminator the port uses everywhere else for this.
+  if love.xr == nil
+     and love.system and love.system.getOS and love.system.getOS() == "iOS" then
     return false
   end
   if not (love.graphics and love.graphics.newCanvas
@@ -358,7 +389,8 @@ local function fit(cx, cy, vw, vh)
   proj = Mat4.mul(Mat4.scale(1, -1, 1), proj)
 
   ShadowMap.clipVP = Mat4.mul(proj, view)
-  ShadowMap.uvVP = Mat4.mul(TO_UNIT, ShadowMap.clipVP)
+  ShadowMap.uvVP = Mat4.mul(GfxCaps.rowsFlipped() and TO_UNIT_FLIPPED or TO_UNIT,
+                            ShadowMap.clipVP)
   -- what the frustum ended up covering, for probes: the lateral extent in
   -- world pixels divided by RES is how fine a shadow edge can land
   ShadowMap.extent = { r - l, t - b, far - near }

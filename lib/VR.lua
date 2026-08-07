@@ -42,6 +42,7 @@
 -- the mod namespace (see main.lua): V.require loads a sibling module
 local V = ...
 
+local GfxCaps = V.require("GfxCaps")
 local ModSetting = V.require("ModSetting")
 local Voxel = V.require("VoxelState")
 local Voxel3D = V.require("Voxel3D")
@@ -451,14 +452,6 @@ end
 --
 -- Kept here rather than in VRRig, which is deliberately platform-free and
 -- stays that way.
-local metalCanvases = nil
-local function canvasIsFlipped()
-  if metalCanvases == nil then
-    local ok, name = pcall(love.graphics.getRendererInfo)
-    metalCanvases = ok and name == "Metal"
-  end
-  return metalCanvases
-end
 
 -- Turn a sky ray fan over in v: the far end becomes the base and the step
 -- reverses. base + 1*dv is the v = 1 edge, so that is the new v = 0.
@@ -556,7 +549,7 @@ local function renderWorld(views, ctl)
     hand = heldPose(views[1].pose)
   end
   if hand and (battle or fp or menu) then
-    Pokedex.place(hand, pivot, anchor, scale, mountYaw)
+    Pokedex.place(hand, pivot, anchor, scale, mountYaw, ctl and ctl.poseKind)
     if uiShowing() then
       -- The engine's UI layer where there is no front buffer to read.
       --
@@ -630,7 +623,7 @@ local function renderWorld(views, ctl)
         local cam = VRRig.eyeCamera(v.pose, v.fov, pivot, anchor, scale, mountYaw)
         -- The sun stays where it is when the head nods, instead of riding
         -- along with it, once the fan agrees with the canvas it is read in.
-        if cam and cam.skyRay and canvasIsFlipped() then
+        if cam and cam.skyRay and GfxCaps.rowsFlipped() then
           cam.skyRay = flipSkyRay(cam.skyRay)
         end
         return cam

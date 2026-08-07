@@ -209,7 +209,16 @@ Pokedex.frame = nil
 
 -- Stand the device on a tracked LEFT-HAND pose under the current
 -- XR-to-world mapping (the same pivot/anchor/scale/yaw the eyes got).
-function Pokedex.place(pose, pivot, anchor, scale, yaw)
+-- `kind` says where the pose came from: "grip" for a controller's grip anchor,
+-- anything else (nil included) for a bare hand.
+--
+-- The two are not the same convention and no amount of one set of numbers will
+-- serve both. OFFSET and TILT were measured against a controller GRIP and lay
+-- the slab along the controller's body -- that is the whole of the attachment
+-- there. SPIN and PITCH were added on top of them for the ARKit HAND anchor,
+-- which holds the palm differently, and applying that pair to a grip is what
+-- leaves the device lying across the controller instead of along it.
+function Pokedex.place(pose, pivot, anchor, scale, yaw, kind)
   -- LIFT goes in on the POSITION rather than onto the finished matrix:
   -- propMatrix applies the hand's rotation last, so anything multiplied on
   -- afterwards is in the hand's own axes. Moving the pose is the one place in
@@ -222,11 +231,13 @@ function Pokedex.place(pose, pivot, anchor, scale, yaw)
   m = Mat4.mul(m, Mat4.translate(Pokedex.OFFSET[1], Pokedex.OFFSET[2],
                                  Pokedex.OFFSET[3]))
   m = Mat4.mul(m, Mat4.rotateX(Pokedex.TILT))
-  if Pokedex.SPIN and Pokedex.SPIN ~= 0 then
-    m = Mat4.mul(m, Mat4.rotateY(Pokedex.SPIN))
-  end
-  if Pokedex.PITCH and Pokedex.PITCH ~= 0 then
-    m = Mat4.mul(m, Mat4.rotateX(Pokedex.PITCH))
+  if kind ~= "grip" then
+    if Pokedex.SPIN and Pokedex.SPIN ~= 0 then
+      m = Mat4.mul(m, Mat4.rotateY(Pokedex.SPIN))
+    end
+    if Pokedex.PITCH and Pokedex.PITCH ~= 0 then
+      m = Mat4.mul(m, Mat4.rotateX(Pokedex.PITCH))
+    end
   end
   Pokedex.frame = { model = m }
 end
