@@ -1152,12 +1152,28 @@ end
 -- MUST be paired with endWater, which puts the frame back together.
 function Voxel3D.beginWater(paint)
   if not (active and canvas and held and held.depth) then return nil end
-  if not held.mirror then
-    local ok, c = pcall(love.graphics.newCanvas, held.w, held.h)
+  -- SIZED LIKE THE DEPTH BUFFER, not like the logical eye.
+  --
+  -- held.w/h are what the eye canvas REPORTS -- its logical size, which on a
+  -- foveated headset eye is 6888x5525 while the texture behind it is
+  -- 2624x2560. Built at the logical size, this canvas was 150 MB per eye and,
+  -- worse, was attached beside a depth buffer of the physical size: the pass
+  -- is then clipped to the smaller of the two, so about one seventh of the
+  -- mirror was ever written and the rest stayed at the black clear.
+  --
+  -- That is the whole reason the water reflected nothing. The march found its
+  -- crossings correctly and read the colour out of a picture that was black
+  -- almost everywhere.
+  local mw = (held.physW and held.physW > 0) and held.physW or held.w
+  local mh = (held.physH and held.physH > 0) and held.physH or held.h
+  if not (held.mirror and held.mirrorW == mw and held.mirrorH == mh) then
+    if held.mirror then pcall(held.mirror.release, held.mirror) end
+    local ok, c = pcall(love.graphics.newCanvas, mw, mh)
     if not (ok and c) then return nil end
     pcall(c.setFilter, c, "nearest", "nearest")
     pcall(c.setWrap, c, "clamp", "clamp")
     held.mirror = c
+    held.mirrorW, held.mirrorH = mw, mh
   end
   love.graphics.setShader()
   -- the frame's own depth rides along, so the paint below can test against
@@ -1186,7 +1202,12 @@ function Voxel3D.beginWater(paint)
       pcall(copyShader.send, copyShader, "rateLookup", held.rateMap)
     end
   end
-  love.graphics.draw(canvas)
+  -- Scaled to fill it: the source reports logical dimensions, the target is
+  -- physical, and the copy shader above resolves the packing on the way. What
+  -- lands is the frame as one ordinary picture, at the resolution the eye
+  -- actually has -- so the water samples it with plain screen coordinates and
+  -- needs no conversion of its own.
+  love.graphics.draw(canvas, 0, 0, 0, mw / held.w, mh / held.h)
   love.graphics.setShader()
   love.graphics.setBlendMode("alpha")
   if paint and activeShader then

@@ -76,6 +76,7 @@
 -- the mod namespace (see main.lua): V.require loads a sibling module
 local V = ...
 
+local GfxCaps = V.require("GfxCaps")
 local ModSetting = V.require("ModSetting")
 local Sky = V.require("Sky")
 local DayNight = V.require("DayNight")
@@ -375,7 +376,58 @@ Water.RAY_GROW = 1.18
 -- classic screen-space smear, where a tree between the camera and the pond
 -- paints itself across the water -- and this is the test that drops it.
 Water.RAY_THICK = 1.6
+
+-- The smallest step-span the thickness test will measure against, in depth
+-- units. This is what made the test reject EVERY crossing on this platform.
+--
+-- The yardstick is `span`, the depth one step covered -- and depth is not
+-- linear. Far from the camera it collapses towards nothing, so span goes to
+-- nothing with it, and `span * RAY_THICK` becomes a tolerance narrower than
+-- the difference between a value the shader computes and the same value read
+-- back out of a depth texture. Every crossing then looks like a ray that dived
+-- far past a thin thing, and the debug view painted the whole lake orange with
+-- not one hit on it.
+--
+-- The old floor was 1e-7, which is a guard against dividing by zero rather
+-- than a tolerance. This one is a real one: near the camera span is far larger
+-- and nothing changes, and far away the test stops being infinitely strict.
+--
+-- Why the PC never showed it: the same scene there sits at depths where span
+-- is still comfortably above any such difference. It is not a different bug on
+-- a different platform, it is the same test with no floor under it.
+Water.THICK_FLOOR = 2e-4
 Water.EDGE_FADE = 0.14         -- reflection eased off over this much of the frame
+
+-- How much of a screen-space hit survives in STEREO, where the same hit may
+-- exist in one eye and not the other.
+--
+-- Back to full. It was halved while the per-eye dark patch was thought to BE
+-- the problem; the actual fault was the reflection's colour being sampled
+-- without the foveation conversion, and a weakened wrong answer is still a
+-- wrong answer. Lower this only if the patch comes back once the sampling is
+-- right.
+Water.STEREO_RAYS = 1.0
+
+-- Whether the REFLECTION's colour goes through the foveation conversion the
+-- depth lookup uses.
+--
+-- It does. This was flipped back and forth once with no visible difference,
+-- which looked like evidence and was not: the thickness test was rejecting
+-- every crossing at the time, so the march never sampled a colour at all and
+-- neither setting could show. One bug was hiding the other.
+--
+-- With hits landing, the window reflects the grass and the headset reflected
+-- mottled noise that swung with the head -- which is what an unconverted
+-- sample of a gaze-packed image looks like, because the packing follows the
+-- eyes.
+Water.REFLECT_RATE = false
+
+-- Paint a diagnostic instead of the water.
+--   1  the march's outcome, by exit -- see debugRays in the shader
+--   2  the depth buffer against project()'s own answer, red vs green
+--   3  the mirror the reflection is read out of, at this pixel's own place
+-- false or nil to switch off.
+Water.DEBUG_RAYS = false
 
 -- ------- the shader
 --
@@ -489,6 +541,17 @@ uniform LOVE_HIGHP_OR_MEDIUMP Image depthTex;
 uniform Image rateLookup;
 uniform vec2 physSize;
 uniform float useRateLookup;
+uniform float colorRate;
+uniform float rowFlip;
+// A COLOUR MAP OF THE MARCH, not a number.
+//
+// A fragment shader cannot hand back a statistic, but it can paint one. With
+// this on, every exit from the march gets its own colour and the water shows
+// nothing else -- so one screenshot in the headset beside one in the window
+// answers the question three fixes have been guessing at: does the march FIND
+// anything in VR, or does it find the right thing and read the wrong colour?
+// Those are different repairs and only the first has never been checked.
+uniform float debugRays;
 
 float sceneDepthAt(vec2 logicalUV) {
   vec2 uv = logicalUV;
@@ -508,7 +571,60 @@ float sceneDepthAt(vec2 logicalUV) {
   return Texel(depthTex, uv).r;
 }
 
+// The frame's COLOUR at a logical point, through the same conversion.
+//
+// The same conversion, because it is the same picture: the mirror is a copy
+// of the eye's own canvas, which reports logical dimensions to LOVE while
+// physically holding only the fragments the gaze map selected. The depth
+// lookup has gone through the rate map since the water's occlusion was fixed;
+// the colour beside it did not, and sampled the packed image at logical
+// coordinates.
+//
+// That is why the reflection MOVED WITH THE HEAD. The packing is eye-tracked,
+// so its dense region follows the gaze -- an unconverted sample lands
+// somewhere that shifts as the eyes do, which is why nearby objects went
+// missing and the surface mostly handed back sky. On the flat screen there is
+// no rate map, useRateLookup is 0, and the same code has always been correct.
+vec3 sceneColorAt(vec2 logicalUV) {
+  // v TURNED OVER where the renderer stores canvas rows the other way up.
+  //
+  // The depth beside this needs no such thing, and that asymmetry is the whole
+  // point: the depth buffer was written by the mod's OWN rasteriser, under the
+  // mod's clip-space convention, so project()'s 0.5x+0.5 addresses it
+  // correctly. The mirror was written by love.graphics.draw -- LOVE's
+  // convention, top-left on Metal -- and the two disagree by exactly this
+  // flip.
+  //
+  // It shows as a reflection that sits about right looking straight ahead and
+  // then travels the wrong way as the head pitches, mirrored about the middle
+  // of the frame. Straight ahead is where a flip about the centre is nearly
+  // the identity, which is why it looked like a near-miss rather than an
+  // inversion.
+  vec2 uv = logicalUV;
+  if (rowFlip > 0.5) uv.y = 1.0 - uv.y;
+  // colorRate, not useRateLookup, because the two textures need not agree.
+  // The depth buffer IS the compositor's, packed. The mirror is a canvas of
+  // our own at LOGICAL size that the frame was copied into -- and whether
+  // that copy left the content packed or stretched it back out is not
+  // something the source says. One is right and the other is visibly wrong,
+  // so it is a switch rather than a conclusion; see Water.REFLECT_RATE.
+  if (colorRate > 0.5) {
+    uv = Texel(rateLookup, clamp(logicalUV, 0.0, 1.0)).rg;
+  }
+  return Texel(reflectTex, uv).rgb;
+}
+
 uniform float rays;          // 0 = sky only, 1 = march the screen too
+// How much of a march HIT to believe. 1 in mono; less in stereo, and the
+// reason is the one failure mode a screen-space reflection has in a headset:
+// it reads the reflection out of the frame's own picture, and the two eyes
+// hold different pictures. An object near the edge of what one eye can see is
+// found by that eye and missed by the other, and a solid hit in one eye alone
+// reads as a dark patch that shifts with the head. Weakening the hit does not
+// make the eyes agree -- nothing can, a screen-space reflection is a property
+// of the view -- but it turns a disagreement from a shadow into a shimmer,
+// which is what a reflection on moving water looks like anyway.
+uniform float rayStrength;
 uniform vec3 lookFlat;       // the way the horizon lies from this camera
 uniform float lean;          // and how far the reflection tilts toward it
 uniform float leanElev;      // the elevation it aims at, in radians
@@ -524,6 +640,7 @@ uniform float fresnelPower;
 uniform float rayStep;
 uniform float rayGrow;
 uniform float rayThick;
+uniform float thickFloor;
 uniform float edgeFade;
 
 // the sky, as Sky paints it
@@ -733,11 +850,20 @@ vec4 project(vec3 p) {
 // the colour found in .rgb and how much of it to believe in .a -- 0 for a
 // ray that left the frame, ran out of steps, or crossed something it went
 // straight through rather than landed on.
+// BLUE    the ray's own origin does not project -- behind the camera
+// RED     the ray walked out of the frame; there is no evidence off-screen
+// ORANGE  it crossed something far too thick to be a surface it could land on
+// GREY    it ran out of steps without crossing anything
+// GREEN   a hit, brightness by how much of it survives the edge fade
+vec4 debugExit(vec3 rgb) { return vec4(rgb, 1.0); }
+
 vec4 march(vec3 origin, vec3 dir) {
-  vec4 miss = vec4(0.0, 0.0, 0.0, 0.0);
+  vec4 miss = (debugRays > 0.5) ? debugExit(vec3(0.0, 0.0, 1.0))
+                                : vec4(0.0, 0.0, 0.0, 0.0);
   vec3 a = origin;
   vec4 pa = project(a);
   if (pa.w < 0.5) return miss;
+  if (debugRays > 0.5) miss = debugExit(vec3(1.0, 0.0, 0.0));
   float len = rayStep;
   for (int i = 0; i < RAY_STEPS; i++) {
     vec3 b = a + dir * len;
@@ -748,8 +874,9 @@ vec4 march(vec3 origin, vec3 dir) {
     if (pb.z > scene) {
       // how much depth this one step covered: the yardstick for whether
       // the crossing is a surface or a thin thing the ray shot past
-      float span = max(abs(pb.z - pa.z), 1e-7);
-      if (pb.z - scene > span * rayThick) return miss;
+      float span = max(abs(pb.z - pa.z), thickFloor);
+      if (pb.z - scene > span * rayThick)
+        return (debugRays > 0.5) ? debugExit(vec3(1.0, 0.55, 0.0)) : miss;
       // binary-refine onto the contact
       vec3 lo = a;
       vec3 hi = b;
@@ -773,13 +900,16 @@ vec4 march(vec3 origin, vec3 dir) {
       vec2 e = min(hit.xy, 1.0 - hit.xy);
       float edge = smoothstep(0.0, edgeFade, min(e.x, e.y));
       float far = 1.0 - clamp(float(i) / float(RAY_STEPS), 0.0, 1.0);
-      return vec4(Texel(reflectTex, hit.xy).rgb, edge * (0.15 + 0.85 * far));
+      float believe = edge * (0.15 + 0.85 * far) * rayStrength;
+      if (debugRays > 0.5)
+        return debugExit(vec3(0.0, 0.15 + 0.85 * believe, 0.0));
+      return vec4(sceneColorAt(hit.xy), believe);
     }
     a = b;
     pa = pb;
     len *= rayGrow;
   }
-  return miss;
+  return (debugRays > 0.5) ? debugExit(vec3(0.35)) : miss;
 }
 
 // ------- the surface, as a field of pixel-tall columns
@@ -1090,8 +1220,39 @@ vec4 effect(mediump vec4 color, Image tex, mediump vec2 tc, mediump vec2 sc) {
   if (skyOn > 0.5) {
     refl = bodyAt(r, skyAt(r, parity), parity);
   }
+  // DEBUG 2: the two depths, side by side in two channels.
+  //
+  // RED is what the depth buffer holds at this pixel. GREEN is what project()
+  // computes for the water surface standing at this very pixel. The water is
+  // drawn against that buffer and its own depth test passes, so at a water
+  // pixel the two describe the same place and the surface should come out an
+  // even yellow.
+  //
+  // Anything else is the answer: red-dominant or green-dominant means the two
+  // live on different scales, and a march that compares them can only ever
+  // cross too early, too late, or never -- which is exactly grey in the middle
+  // and orange at the shore, with no hit anywhere.
+  // DEBUG 3: the MIRROR itself, at this pixel's own screen position, with the
+  // march taken out of the question entirely.
+  //
+  // The mirror is the frame's own picture. Sampled at the water pixel's own
+  // place it must show what was drawn there before the water went over it --
+  // the lake bed and the shore, sharp and still, moving only as the scene
+  // moves. If it is noise, or if it swims when the head turns, then the
+  // reflection was never the problem: the picture the march reads from is
+  // already wrong, and every hit it finds can only return rubbish.
+  if (debugRays > 2.5) {
+    vec4 selfC = project(surf);
+    return vec4(sceneColorAt(selfC.xy), 1.0) * color;
+  }
+  if (debugRays > 1.5) {
+    vec4 selfC = project(surf);
+    float scene = sceneDepthAt(selfC.xy);
+    return vec4(scene, selfC.z, 0.0, 1.0) * color;
+  }
   if (rays > 0.5) {
     vec4 hit = march(surf, r);
+    if (debugRays > 0.5) return vec4(hit.rgb, 1.0) * color;
     refl = mix(refl, hit.rgb, hit.a);
   }
 
@@ -1260,6 +1421,10 @@ function Water.begin(ctx)
   send("physSize", { ctx.physW or 0, ctx.physH or 0 })
   send("rateLookup", ctx.rateMap or ctx.depth)
   send("useRateLookup", ctx.rateMap and 1 or 0)
+  send("colorRate", (ctx.rateMap and Water.REFLECT_RATE) and 1 or 0)
+  send("rowFlip", GfxCaps.rowsFlipped() and 1 or 0)
+  send("thickFloor", Water.THICK_FLOOR)
+  send("debugRays", tonumber(Water.DEBUG_RAYS) or (Water.DEBUG_RAYS and 1 or 0))
 
   -- the sun's pass, sent the same way and for the same reason the scene
   -- shader sends it: the sampler is declared either way, and leaving one
@@ -1275,16 +1440,14 @@ function Water.begin(ctx)
   send("sunTexel", { texel, texel })
   send("dayTint", Voxel3D.tint or { 1, 1, 1 })
 
-  -- The screen-space march is OFF in stereo, whatever the row says.
-  --
-  -- It reflects the shoreline by walking the frame's own picture, so what it
-  -- finds is a property of one eye's view. The two eyes hold different
-  -- pictures, so they find different things and the surface carries a dark
-  -- patch that shifts with the head and disagrees between the eyes. There is
-  -- no per-eye version of the effect to synchronise -- a screen-space
-  -- reflection is monoscopic by construction. The sky reflection, the sun and
-  -- the moon are all view-independent and stay.
-  send("rays", (level >= 2 and not ctx.stereo) and 1 or 0)
+  -- The screen-space march reflects the shoreline by walking the frame's own
+  -- picture, so what it finds is a property of one eye's view -- and in a
+  -- headset the two eyes hold different pictures. It was off in stereo for a
+  -- while because of that, which cost the reflections entirely; now it runs
+  -- with its hits weakened instead. See rayStrength in the shader for why that
+  -- is the honest trade rather than a fudge.
+  send("rays", (level >= 2) and 1 or 0)
+  send("rayStrength", ctx.stereo and Water.STEREO_RAYS or 1)
   -- the horizon lean, and the direction it leans toward (see Water.lean)
   send("lookFlat", ctx.lookFlat or { 0, 0, -1 })
   send("lean", Water.lean(ctx.descent))
