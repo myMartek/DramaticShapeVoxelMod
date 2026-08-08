@@ -369,7 +369,7 @@ Water.WAVE_SLOPE_LEAN = 1.5
 -- surface the reflection needs precision (a shoreline is a few pixels), far
 -- from it reach matters more than accuracy, and a geometric ramp gets both
 -- out of one loop. RAY_STEPS is compiled in -- GLSL wants a constant bound.
-Water.RAY_STEPS = 24
+Water.RAY_STEPS = 32
 Water.RAY_REFINE = 5           -- halvings once a crossing is found
 Water.RAY_STEP = 3.0           -- world pixels in the first step
 -- and the ratio each step after it. 3 x (1.18^24 - 1) / 0.18 is about 930
@@ -493,6 +493,7 @@ Water.REFLECT_RATE = false
 --   4  the reflection itself, raw -- no fade, no edge, no Fresnel
 -- false or nil to switch off.
 Water.DEBUG_RAYS = false
+
 
 -- ------- the shader
 --
@@ -962,7 +963,25 @@ vec4 march(vec3 origin, vec3 dir) {
     vec3 b = a + dir * len;
     vec4 pb = project(b);
     if (pb.w < 0.5) return miss;
-    if (pb.x < 0.0 || pb.x > 1.0 || pb.y < 0.0 || pb.y > 1.0) return miss;
+    if (pb.x < 0.0 || pb.x > 1.0 || pb.y < 0.0 || pb.y > 1.0) {
+      // DIAGNOSTIC: WHICH edge, and how far the ray got before it left.
+      //
+      // "the ray left the frame" is 93 per cent of the lake in a headset and
+      // one bucket tells you nothing about why. An exit through the SIDE or the
+      // top is a ray aimed somewhere a reflection cannot be -- a direction
+      // fault. An exit through the bottom, one step in, is a ray aimed
+      // correctly at a lake that simply reaches the bottom of a wide frame --
+      // an abort that is too eager. Those want opposite fixes.
+      //
+      // B marks this as an edge exit (the plain red miss above has B = 0),
+      // R names the edge, G carries i / RAY_STEPS.
+      if (exitMap) {
+        float edge = pb.x < 0.0 ? 0.25 : (pb.x > 1.0 ? 0.50
+                   : (pb.y < 0.0 ? 0.75 : 1.00));
+        return debugExit(vec3(edge, float(i) / float(RAY_STEPS), 1.0));
+      }
+      return miss;
+    }
     float scene = sceneDepthAt(pb.xy);
     // THE SKY IS NOT A SURFACE. Nothing was drawn there, so the buffer holds
     // the far plane, and a ray far enough out crosses it -- reporting a hit on
@@ -1271,7 +1290,13 @@ vec4 effect(mediump vec4 color, Image tex, mediump vec2 tc, mediump vec2 sc) {
   // love_ScreenSize reports the logical size -- dividing by that reached about
   // a third of the way across and tested every water pixel against the wrong
   // part of the frame. Zero means no foveation and the logical size is right.
-  vec2 uv = sc / (physSize.x > 0.5 ? physSize : love_ScreenSize.xy);
+  // Through project(), like the march -- not through sc / physSize.
+  //
+  // The fragment's own coordinate is PHYSICAL and project() is LOGICAL, and
+  // sceneDepthAt converts from one and not the other. Feeding it both meant
+  // the self test and the march disagreed by exactly the packing, which is
+  // zero without foveation and moves with the gaze under it.
+  vec2 uv = project(vBent).xy;
   vec4 selfC = vp * vec4(vBent, 1.0);
   float selfZ = selfC.z / selfC.w * 0.5 + 0.5;
   if (selfZ > sceneDepthAt(uv) + 2e-4) discard;
@@ -1561,6 +1586,8 @@ Water._waveTime = waveTime
 -- water mesh through the ordinary scene shader instead.
 function Water.begin(ctx)
   if not (ctx and ctx.reflect and ctx.depth) then return false end
+
+
   local level = Water.level()
   if level <= 0 then return false end
   local sh = ctx.grid and Water.shader(true) or nil

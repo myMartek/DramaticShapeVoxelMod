@@ -197,6 +197,14 @@ uniform vec3 rayDv;     // base + u*du + v*dv, world axes -- so each pixel
                         // real skybox, untouched by any head motion
 uniform float raySpan;  // radians of elevation the gradient covers
 uniform vec2 invSize;   // 1/w, 1/h: canvas pixels to fractions
+uniform Image rateInv;  // physical fraction -> logical fraction, under
+                        // foveation (love.xr.rateMapInverse). The fan below
+                        // turns a POSITION into a direction, and a fragment's
+                        // own position is packed -- so without this the whole
+                        // gradient slides and tips as the gaze moves the dense
+                        // region about, while the geometry stays put.
+uniform vec2 physSize;  // the packed extent; 0 when there is no packing
+uniform float useRateInv;
 uniform float useRay;   // 0 = the flat screen's frame-linear gradient
 uniform float cellAng;  // one checker cell in RADIANS (ray path): the
                         // dither's own grid, laid on azimuth/elevation so
@@ -237,8 +245,11 @@ vec4 effect(vec4 color, Image tex, vec2 tc, vec2 sc) {
     // the world and no motion of the head recomputes the pattern. The
     // one seam, where azimuth wraps behind the camera, is a single cell
     // column of a dither pattern.
-    vec3 dir = rayBase + rayDu * (sc.x * invSize.x)
-                       + rayDv * (sc.y * invSize.y);
+    vec2 frac = vec2(sc.x * invSize.x, sc.y * invSize.y);
+    if (useRateInv > 0.5) {
+      frac = vec2(Texel(rateInv, clamp(sc / physSize, 0.0, 1.0)).rg);
+    }
+    vec3 dir = rayBase + rayDu * frac.x + rayDv * frac.y;
     float elev = atan(dir.y, length(dir.xz));
     float ei = floor(elev / cellAng);                 // elevation row
     if (ei < 0.0) { discard; }                        // below the horizon
@@ -596,7 +607,8 @@ end
 -- Returns false when there is nothing to paint, in which case the caller's flat
 -- fill is the whole sky. That fill is the palest band, so a frame that declines
 -- this looks like a hazy day rather than like a bug.
-function Sky.paint(w, h, sky, horizonY, cell, body, top, axis, ray)
+function Sky.paint(w, h, sky, horizonY, cell, body, top, axis, ray,
+                   rateInv, physW, physH)
   local bands = sky and sky.bands
   if not (bands and bands[1]) then return false end
   if not (w and h and w > 0 and h > 0) then return false end
@@ -672,6 +684,16 @@ function Sky.paint(w, h, sky, horizonY, cell, body, top, axis, ray)
         sh:send("rayDv", ray.dv)
         sh:send("raySpan", Sky.ELEV_SPAN)
         sh:send("invSize", { 1 / w, 1 / h })
+        -- Sent only when there IS one. An Image uniform that is never
+        -- assigned keeps LOVE's default binding, which the branch below never
+        -- reads; assigning nil is what would fault.
+        local hasInv = rateInv ~= nil
+        if hasInv then
+          local okI = pcall(sh.send, sh, "rateInv", rateInv)
+          hasInv = okI
+        end
+        sh:send("useRateInv", hasInv and 1 or 0)
+        sh:send("physSize", { physW or 0, physH or 0 })
         -- the angular checker's cell: the angle one dither cell spans at
         -- the frame's centre, so the sky-glued grid comes out the same
         -- size on screen as the diorama's own pixel grid
