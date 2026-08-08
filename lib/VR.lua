@@ -127,11 +127,29 @@ local mirrorCanvas = nil
 local status = "off"
 
 -- the diorama's live adjustments: the right stick's zoom (a multiplier on
--- the model's size) and the grab-drag's height (metres of world travel)
+-- the model's size), and the grab -- metres of world travel and radians of
+-- world turn, both carried on top of what VRRig hands back so that
+-- lib/VRRig.lua stays a pure function of the rung and the head.
+--
+-- Bounded, and not for tidiness: the table is anchored in front of the face,
+-- and an unbounded drag puts the whole town behind the player with no way back
+-- but the rung reset.
 local zoom = 1
 local heightOff = 0
+local panX, panZ = 0, 0         -- metres, the grab's horizontal travel
+local dioYaw = 0                -- radians, the grab's turn
+local PAN_LIMIT = 3
+local PAN_RATE = 1.2            -- metres a second, at full stick
+local GRAB_TURN_RATE = 1.4      -- radians a second, at full stick
+
+local function clamp(v, lo, hi)
+  return math.max(lo, math.min(hi, v))
+end
 local held = {}                 -- GB buttons this module is holding down
-local lastHandY = nil           -- the gripping hand's height, last frame
+local lastGrab = nil            -- the gripping hand's position, last frame
+local lastSpan, lastAng = nil, nil   -- the two-handed line, last frame
+
+local padStartBinding = nil     -- the engine's own START binding, while parked
 
 -- First person's SNAP TURN: the right stick flicked left or right steps
 -- the whole XR-to-world mapping 45 degrees at a time (a smooth software
@@ -145,6 +163,45 @@ local snapArmed = true          -- re-arms when the stick returns to centre
 
 local function wrapPi(a)
   return (a + math.pi) % (2 * math.pi) - math.pi
+end
+
+-- ------- where the player put the table, kept for next time
+--
+-- Its own file rather than an options row: the rows are a menu, and this is
+-- not a setting anybody chooses from a list -- it is where a pair of hands
+-- left something. A row would also have to be hidden from the one menu the
+-- headset shows, which is a lot of machinery for five numbers.
+--
+-- Written when a gesture ENDS, not while it runs. A drag touches these values
+-- every frame, and a file written every frame is a file being written during
+-- the one pass that has a millisecond budget.
+local DIORAMA_FILE = "diorama.txt"
+local dioramaLoaded = false
+local dioramaDirty = false
+local stickZoom = false         -- the pad's zoom moved this frame
+
+local function loadDiorama()
+  if dioramaLoaded then return end
+  dioramaLoaded = true
+  local ok, data = pcall(love.filesystem.read, DIORAMA_FILE)
+  if not (ok and type(data) == "string") then return end
+  local x, z, h, y, zm = data:match("^(%S+) (%S+) (%S+) (%S+) (%S+)")
+  x, z, h, y, zm = tonumber(x), tonumber(z), tonumber(h), tonumber(y), tonumber(zm)
+  if not (x and z and h and y and zm) then return end
+  -- Clamped on the way in as well as on the way out. A file is editable, and
+  -- a hand-typed zoom of zero would divide the scale into infinity.
+  panX = clamp(x, -PAN_LIMIT, PAN_LIMIT)
+  panZ = clamp(z, -PAN_LIMIT, PAN_LIMIT)
+  heightOff = clamp(h, -1.5, 1.5)
+  dioYaw = wrapPi(y)
+  zoom = clamp(zm, 0.35, 4)
+end
+
+local function saveDiorama()
+  if not dioramaDirty then return end
+  dioramaDirty = false
+  pcall(love.filesystem.write, DIORAMA_FILE,
+        string.format("%.4f %.4f %.4f %.4f %.4f", panX, panZ, heightOff, dioYaw, zoom))
 end
 
 -- The battle snap, made a FADE rather than a cut: when a fight is staged
@@ -227,7 +284,7 @@ local function releaseInputs()
     Game.input:gamepadaxis(nil, "leftx", 0)
     Game.input:gamepadaxis(nil, "lefty", 0)
   end)
-  lastHandY = nil
+  lastGrab = nil
 end
 
 local function shutdown(reason)
@@ -252,7 +309,13 @@ local function shutdown(reason)
   -- controller was when the session died -- on the FLAT screen, where the
   -- view model should have taken over
   V.require("HordeGun").clear()
+  -- Saved before the reset, not after: shutdown puts the live values back to
+  -- their defaults, and writing those would be forgetting on the way out.
+  saveDiorama()
   zoom, heightOff = 1, 0
+  panX, panZ, dioYaw = 0, 0, 0
+  lastSpan, lastAng = nil, nil
+  dioramaLoaded = false
   fpYawOff, snapArmed = 0, true
   camMode, fadeAlpha = "explore", 0
   status = reason or "off"
@@ -559,6 +622,14 @@ local function renderWorld(views, ctl)
     -- own adjustments go on top: the stick's zoom, the grip's height.
     pivot = VRRig.dioramaPivot(ow.camera.x + vw / 2, ow.camera.y + vh / 2)
     anchor = VRRig.dioramaAnchor(Voxel.angle, heightOff)
+    -- the grab, on top: the anchor is where the model sits relative to the
+    -- head, so pushing it is pushing the table across the room, and dioYaw
+    -- turns the MAPPING -- the same seam the battle mount and the snap turn
+    -- already turn through, so the pokedex and the panel come round with it
+    -- rather than being left facing the old north.
+    anchor[1] = anchor[1] + panX
+    anchor[3] = anchor[3] + panZ
+    if dioYaw ~= 0 then mountYaw = dioYaw end
     scale = VRRig.dioramaScale(vh, Voxel.FOCAL) / zoom
   end
 
@@ -1024,6 +1095,64 @@ local function driveControls(ctl, dt, fp)
   if not (ok and Game.input) then return end
   local inp = Game.input
 
+  -- THE GRAB, decided before anything reads a stick.
+  --
+  -- Squeezing L1/R1 takes hold of the world. With a tracked controller that is
+  -- literal -- the table follows the hand, wherever it goes -- and the
+  -- sticks are left alone, because a hand that is dragging is not also walking.
+  -- A pad has no pose to drag with, so there the same squeeze puts the two
+  -- gestures ON the sticks instead, and the walk has to stand down for as long
+  -- as it is held. Diorama only: in first person and in a fight the world is
+  -- not a model on a table and there is nothing to pick up.
+  -- START AND SELECT, taken off the engine's pad path.
+  --
+  -- Both Sense pills arrive there as one button (`start`), so the engine
+  -- cannot tell Create from Options and bound both to START. lib/VRCS.lua can
+  -- tell them apart -- GameController keeps a profile per half -- so while it
+  -- reports them, the engine's binding is removed and the two setGB calls
+  -- below are the only source. Removed rather than rebound: a rebind would
+  -- still fire on whichever pill SDL happened to deliver.
+  --
+  -- Restored the moment the flag goes away, because that is the DualSense
+  -- case, where `start` is the pad's own button and the engine is right.
+  if inp.padBindings then
+    if ctl.senseButtons and inp.padBindings.start then
+      padStartBinding = inp.padBindings.start
+      inp.padBindings.start = nil
+    elseif not ctl.senseButtons and padStartBinding then
+      inp.padBindings.start = padStartBinding
+      padStartBinding = nil
+    end
+  end
+
+  local gl, gr = ctl.gripL or 0, ctl.gripR or 0
+  local diorama = not fp and camMode ~= "battle"
+  local grabbing = diorama and math.max(gl, gr) > 0.6
+
+  -- TWO HANDS TURN AND SCALE, one hand moves.
+  --
+  -- The line between the hands is the gesture: swing it and the town swings,
+  -- pull the hands apart and it grows. One hold, both transforms, and it is
+  -- the same thing hands do to a map on a table.
+  --
+  -- It used to be L1 with R2, and that could never fire: the right half's
+  -- trigger reports 0.00 and nothing else. Measured, not assumed -- 194
+  -- samples through lib/VRCS.lua's own record, in which the LEFT trigger ran
+  -- the full analogue range and the right one never left zero while both grips
+  -- worked. So the gesture is built on the grips, which do.
+  --
+  -- Horizontal distance only. Lifting one hand while both are held would
+  -- otherwise lengthen the line and zoom out, and raising a hand is not a
+  -- thing anyone means by it.
+  local lp = (ctl.handl and ctl.handl.pos) or nil
+  local rp = (ctl.handr and ctl.handr.pos) or nil
+  local hasPose = (lp or rp) ~= nil
+  local twoHanded = diorama and gl > 0.6 and gr > 0.6 and lp and rp
+
+  local grabbing = diorama and not twoHanded and math.max(gl, gr) > 0.6
+  local grabPose = grabbing and ((gr >= gl) and rp or lp) or nil
+  local padGrab = grabbing and grabPose == nil
+
   -- HORDE MODE re-reads the right hand as a weapon: the trigger fires
   -- (its own OpenXR action, suggested alongside START on the same input
   -- -- see VRXR.setupInput), and B reloads. START is dropped rather than
@@ -1043,13 +1172,17 @@ local function driveControls(ctl, dt, fp)
     setGB(inp, "b", ctl.b)
     setGB(inp, "start", ctl.start)
   end
+  -- SELECT, which no other path on this hardware delivers. Outside horde mode
+  -- as well as inside it: the mode drops START because it does not pause, and
+  -- SELECT does not pause either.
+  setGB(inp, "select", ctl.select)
 
   -- the left stick, through the engine's OWN stick handler: it quantises
   -- to the grid d-pad for the diorama, and FirstPerson.moveVector reads
   -- the same raw pair for the free walk. OpenXR's +Y is up; the engine's
   -- lefty is +down.
-  inp:gamepadaxis(nil, "leftx", ctl.moveX or 0)
-  inp:gamepadaxis(nil, "lefty", -(ctl.moveY or 0))
+  inp:gamepadaxis(nil, "leftx", padGrab and 0 or (ctl.moveX or 0))
+  inp:gamepadaxis(nil, "lefty", padGrab and 0 or -(ctl.moveY or 0))
 
   -- the left stick click: the VOXEL ladder ordinarily, and the way out of
   -- horde mode while it runs (the rung is locked there, so the click has
@@ -1090,25 +1223,90 @@ local function driveControls(ctl, dt, fp)
     end
   end
 
-  if not fp and camMode ~= "battle" then
-    local zy = ctl.lookY or 0
-    if math.abs(zy) > 0.15 then
-      zoom = math.max(0.35, math.min(4, zoom * math.exp(zy * (dt or 0) * 1.6)))
-    end
-    -- the grab-drag: while a grip is squeezed, the table follows that
-    -- hand's height, metre for metre
-    local gl, gr = ctl.gripL or 0, ctl.gripR or 0
-    local y = (gr >= gl) and ctl.handrY or ctl.handlY
-    if math.max(gl, gr) > 0.6 and y then
-      if lastHandY then
-        heightOff = math.max(-1.5, math.min(1.5, heightOff + (y - lastHandY)))
+  if diorama then
+    -- THE WORLD IN YOUR HAND.
+    --
+    -- Metre for metre and radian for radian: the table goes where the hand
+    -- goes and turns as the wrist turns, which is the one mapping nobody has
+    -- to be taught. Deltas rather than absolutes, so letting go and taking
+    -- hold again somewhere more comfortable does not snap the town across the
+    -- room -- the same reason the old height grab tracked a difference.
+    --
+    -- This replaces that grab, which on this platform never fired: it read
+    -- ctl.handlY/handrY, and those are OpenXR's -- lib/VRCS.lua reports whole
+    -- poses and no scalar heights, so the condition was never true and the
+    -- squeeze did nothing at all.
+    if twoHanded then
+      local dx, dz = rp[1] - lp[1], rp[3] - lp[3]
+      local span = math.sqrt(dx * dx + dz * dz)
+      local ang = math.atan2(dz, dx)
+      -- Hands closer together than this are one hand as far as an angle is
+      -- concerned: the direction of a very short line is mostly noise, and
+      -- the ratio of two very short lines is mostly a jump.
+      if span > 0.08 then
+        if lastSpan then
+          -- Adds. Increasing yaw turns LEFT in this mod's compass, so
+          -- subtracting looked right on paper and turned the town the wrong
+          -- way in the headset -- the mapping yaw and the measured angle run
+          -- the same direction, not opposite ones.
+          dioYaw = wrapPi(dioYaw + wrapPi(ang - lastAng))
+          -- span / lastSpan, not the other way about: hands moving apart
+          -- must make the town BIGGER, and zoom divides the scale.
+          zoom = clamp(zoom * (span / lastSpan), 0.35, 4)
+        end
+        lastSpan, lastAng = span, ang
       end
-      lastHandY = y
+      lastGrab = nil
+    elseif grabPose then
+      local q = grabPose
+      lastSpan = nil
+      if lastGrab then
+        panX = clamp(panX + (q[1] - lastGrab[1]), -PAN_LIMIT, PAN_LIMIT)
+        heightOff = clamp(heightOff + (q[2] - lastGrab[2]), -1.5, 1.5)
+        panZ = clamp(panZ + (q[3] - lastGrab[3]), -PAN_LIMIT, PAN_LIMIT)
+      end
+      lastGrab = { q[1], q[2], q[3] }
     else
-      lastHandY = nil
+      lastGrab, lastSpan = nil, nil
     end
+
+    if padGrab then
+      -- The pad's version. It has no hands to make a gesture with, so a held
+      -- shoulder gives it all four: the left stick moves, the right one turns
+      -- and scales. Rates, not offsets -- a stick is a direction held, not a
+      -- distance travelled.
+      local dts = dt or 0
+      panX = clamp(panX + (ctl.moveX or 0) * dts * PAN_RATE, -PAN_LIMIT, PAN_LIMIT)
+      panZ = clamp(panZ - (ctl.moveY or 0) * dts * PAN_RATE, -PAN_LIMIT, PAN_LIMIT)
+      dioYaw = wrapPi(dioYaw - (ctl.lookX or 0) * dts * GRAB_TURN_RATE)
+      zoom = clamp(zoom * math.exp((ctl.lookY or 0) * dts * 1.6), 0.35, 4)
+    elseif not hasPose then
+      -- THE STICK ZOOM, and only where there is nothing better.
+      --
+      -- On a pad it is the only way to scale the model. With tracked
+      -- controllers it is not, and there it was a nuisance: a right stick
+      -- nudged while walking changed the size of the world, which is not
+      -- something anyone asks for by nudging a stick. Gestures own it now.
+      local zy = ctl.lookY or 0
+      if math.abs(zy) > 0.15 then
+        zoom = clamp(zoom * math.exp(zy * (dt or 0) * 1.6), 0.35, 4)
+        stickZoom = true
+      end
+    end
+
+    -- The write, once the hands come off. Where the player put the table is
+    -- worth keeping, and the moment they stop moving it is the moment it is
+    -- worth keeping -- not every frame of the drag, and not only at shutdown,
+    -- which a headset session does not always reach cleanly.
+    local moving = twoHanded or grabPose ~= nil or padGrab or stickZoom
+    if moving then
+      dioramaDirty = true
+    elseif dioramaDirty then
+      saveDiorama()
+    end
+    stickZoom = false
   else
-    lastHandY = nil
+    lastGrab = nil
   end
 end
 
@@ -1212,6 +1410,7 @@ function updateRig(dt)
     pcall(function() qw, qh = love.graphics.getPixelDimensions() end)
     if VRXR.start(qw, qh) then
       started = true
+      loadDiorama()
       waiting = nil
       status = "session created"
       print("[DRAMATIC_SHAPE] VR: " .. VRXR.status())

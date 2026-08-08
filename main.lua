@@ -45,6 +45,26 @@ local mod = ...
 
 local V = { mod = mod, path = mod.path }
 
+-- Whether the UI is the headset's stripped one.
+--
+-- Every row this mod owns parameterises a look the port has settled, and VR
+-- is not optional here at all -- so on a headset the menus carry one row and
+-- the launcher carries no mod toggle. The full set is not deleted, only put
+-- behind a gate: DEBUG mode opens it again, and the gate is the ten taps on
+-- one save slot (see V.setDebug).
+function V.headsetUI()
+  if not love.xr then return false end
+  -- Read through the mod's own options rather than a flag in memory: the gate
+  -- is opened in the LAUNCHER, before the game boots, so the answer has to
+  -- survive that boot -- and the options file is the one thing that does.
+  local ok, debug = pcall(function()
+    return mod.options and mod.options:get("debug")
+  end)
+  return not (ok and debug)
+end
+
+
+
 local function chunkFor(rel)
   local source = mod:read(rel)
   if not source then
@@ -716,13 +736,62 @@ mod.hooks:wrap("ui.options.rows", function(next, game, rows)
     dropRow(out, "battleLayout")
   end
   local full = Voxel.isFull(Pipelines.level("voxel"))
-  if full then
+  if full and not (V.headsetUI and V.headsetUI()) then
     -- FULL owns the rows that PARAMETERISE the diorama -- the wireframe, the
     -- horizon bend, the blur, the hour -- so those come off the menu and
     -- DAYTIME is held at SYNC while its row is unreachable.
     DayNight.forceSync(game)
     dropRow(out, "pipeline:tiltshift")
   end
+  -- ON A HEADSET THERE IS ONE ROW, unless the debug gate is open.
+  --
+  -- Everything this mod puts on the OPTIONS menu parameterises a look the
+  -- port has already settled: the water, the anti-aliasing, the hour, the
+  -- curve, the wireframe, VR itself. In a headset none of them is a decision
+  -- worth reaching for, and VR is not optional at all -- the port IS the mod.
+  -- What is left is the one thing a player genuinely changes: whether they
+  -- stand inside the world or above it.
+  --
+  -- The pipeline's own row goes with them, and a two-choice row takes its
+  -- place. Deliberately NOT a shortened ladder: the level index is persisted,
+  -- so 1 must keep meaning FULL and 6 must keep meaning 1ST. The row maps
+  -- onto those two rungs and leaves the ladder alone.
+  if V.headsetUI and V.headsetUI() then
+    -- And the ENGINE's rows that are about a window on a desk, a phone's
+    -- touch overlay, or a mod list this build does not have. None of them is
+    -- a question in a headset: there is no window to size, no aspect to keep
+    -- faithful, no touch pad, no second mod, and the frame rate belongs to
+    -- the compositor rather than to a menu.
+    for _, id in ipairs({
+      "touchControls", "mods", "fpsCap", "faithfulRes", "videoMode",
+      "zoom", "performance", "uiLayout", "battleBg", "battleFit",
+    }) do
+      dropRow(out, id)
+    end
+    dropRow(out, "pipeline:voxel")
+    -- DAYTIME stays. It is the one row here that is not about how the port
+    -- was tuned but about what the player wants to look at -- morning, night,
+    -- or the clock on their own wall -- and SYNC is a default, not a lock.
+    local keep = {}
+    for _, entry in ipairs(SETTINGS) do
+      if entry[1] == DayNight.setting then keep[#keep + 1] = entry[1]:row() end
+    end
+    keep[#keep + 1] = {
+      id = "DRAMATIC_SHAPE:display",
+      label = "VIEW",
+      value = function()
+        return Voxel.isFull(Pipelines.level("voxel")) and "THIRD PERSON"
+                                                       or "FIRST PERSON"
+      end,
+      step = function(game)
+        local now = Pipelines.level("voxel")
+        Pipelines.setLevel("voxel", Voxel.isFull(now) and 6 or Voxel.FULL_LEVEL)
+        return true
+      end,
+    }
+    return insertGrouped(out, keep)
+  end
+
   local extra = {}
   for _, entry in ipairs(SETTINGS) do
     -- Two things decide whether a row is offered.
@@ -1011,7 +1080,13 @@ do
     function OverworldState:handleInput(...)
       local Game = require("src.core.Game")
       local input = Game.input
-      if input and input.wasPressed and input:wasPressed("select") then
+      -- ...but NOT on a headset, where SELECT is a game button and nothing
+      -- else. The rung is chosen once, in the app's one View row, and a
+      -- shortcut that steps it out from under that row is the same setting
+      -- with two owners disagreeing. DEBUG opens it again, along with the
+      -- rest of the mod's own controls -- headsetUI is false there.
+      if input and input.wasPressed and input:wasPressed("select")
+         and not (V.headsetUI and V.headsetUI()) then
         if cycleVoxel(Game) then return end
       end
       return inner(self, ...)

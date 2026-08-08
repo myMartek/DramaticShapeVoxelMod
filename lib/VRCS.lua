@@ -486,6 +486,64 @@ local function xrSticks()
   return dz(L[1]), dz(L[2]), dz(R[1]), dz(R[2])
 end
 
+-- ------- the squeeze, and the pill
+--
+-- L1/R1 AS THE PLAYER NAMES THEM. A Sense half has no shoulder element at all:
+-- logController printed its whole profile on connect and it resolves Grip,
+-- Trigger, Button A, Button B, Button Menu and the stick -- nothing else. So
+-- the squeeze under the middle finger IS L1/R1 here, and it is the only one on
+-- offer. On an MFi pad the same gesture is the real shoulder button, read
+-- below.
+--
+-- `Button Menu` is the small pill above the stick -- Create on the left half,
+-- Options on the right. `Trigger` resolves on the LEFT half only: a record of
+-- 194 samples off the device had it running the full analogue range there
+-- while the right half's stayed at 0.00 through every pull, with both grips
+-- reporting normally throughout. Nothing is bound to it until that is
+-- understood; the grips carry the gestures instead. SELECT goes on the LEFT one only: the right pill is
+-- START's natural home, and the engine has no binding that reaches either.
+-- This is the exception to the buttons note above, and it is deliberate: A, B
+-- and START arrive through LOVE's own path and are left alone, but nothing
+-- delivers SELECT from these controllers, so reporting it here presses it once
+-- rather than twice.
+--
+-- BOTH pills report the same thing through SDL. LOVE hands them over as the
+-- gamepad button `start`, and the engine binds that to START -- so the left
+-- one, which should be SELECT, pressed START instead. There is no way to tell
+-- them apart on that path: one name, two devices. Here they ARE apart,
+-- because GameController keeps a profile per half, so the mod takes both over
+-- and the engine's binding is dropped for as long as it does (see
+-- lib/VR.lua). `senseButtons` is the flag that says so.
+--
+-- Latched on having actually SEEN a press rather than on the controllers
+-- merely being present: dropping the engine's binding on the strength of an
+-- untested path would take START away and give nothing back. Any Sense button
+-- arms it, so a single A in a menu is enough, and it arms long before anyone
+-- reaches for a pill.
+local senseSeen = false
+
+local function senseButtons(ctl)
+  if love.xr == nil or not love.xr.buttons then return end
+  local ok, b = pcall(love.xr.buttons)
+  if not ok or type(b) ~= "table" then return end
+  local L, R = b[1] or {}, b[2] or {}
+
+  if L.grip or R.grip or L.menu or R.menu or L.a or R.a or L.b or R.b
+     or (tonumber(L.trigger) or 0) > 0.5 or (tonumber(R.trigger) or 0) > 0.5 then
+    senseSeen = true
+  end
+  ctl.senseButtons = senseSeen
+
+  ctl.gripL = L.grip and 1 or 0
+  ctl.gripR = R.grip and 1 or 0
+  -- The index triggers, analogue. L2/R2 to a player: the profile offers one
+  -- `Trigger` per half and this is it.
+  ctl.trigL = tonumber(L.trigger) or 0
+  ctl.trigR = tonumber(R.trigger) or 0
+  ctl.select, ctl.selectChanged = edge("select", L.menu == true)
+  ctl.start,  ctl.startChanged  = edge("start",  R.menu == true)
+end
+
 -- STICKS ONLY -- see the buttons note above.
 local function padSticks()
   local ok, pads = pcall(love.joystick.getJoysticks)
@@ -501,11 +559,22 @@ local function padSticks()
   -- ONE pad: a DualSense, both sticks on the one device.
   if #list < 2 then
     local pad = list[1]
+    local function down(name)
+      local okd, v = pcall(pad.isGamepadDown, pad, name)
+      return (okd and v) and 1 or 0
+    end
     return {
       moveX =  axis(pad, "leftx"),
       moveY = -axis(pad, "lefty"),
       lookX =  axis(pad, "rightx"),
       lookY = -axis(pad, "righty"),
+      -- Digital, reported as the 0/1 the grab threshold already reads. This
+      -- pad has no pose to drag the world with, so lib/VR.lua puts the same
+      -- two gestures on its sticks while a shoulder is held.
+      gripL = down("leftshoulder"),
+      gripR = down("rightshoulder"),
+      trigL = math.max(0, axis(pad, "triggerleft")),
+      trigR = math.max(0, axis(pad, "triggerright")),
     }
   end
 
@@ -527,6 +596,7 @@ function VRCS.input()
   local poses = accessoryPoses()
   if poses then
     local ctl = padSticks() or {}
+    senseButtons(ctl)
     ctl.handl, ctl.handr = poses[1], poses[2]
     -- Aim and grip are the same pose here. The distinction only pays for the
     -- gun, and until that is measured on this hardware, pointing along the
