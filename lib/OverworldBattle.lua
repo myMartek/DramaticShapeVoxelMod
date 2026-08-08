@@ -650,8 +650,15 @@ function OverworldBattle.worldAnim()
   local host = (session.state and session.state.map) or nil
   if not host then return nil end
   local groundY = BattleScene.groundY(host, session.arena)
+  -- The DEFENDER's end, which is where the animation is happening. nil until
+  -- a move has played, and then fxCard falls back to the midpoint it always
+  -- used.
+  local defender = nil
+  if OverworldBattle.animAttacker ~= nil then
+    defender = OverworldBattle.animAttacker and "enemy" or "player"
+  end
   local model = BattleScene.fxCard(session.arena, groundY,
-                                   OverworldBattle.ANCHOR)
+                                   OverworldBattle.ANCHOR, defender)
   if not model then return nil end
   return tex, model
 end
@@ -1039,6 +1046,25 @@ function OverworldBattle.install()
       return inner(self, battle)
     end
     OverworldState.dramaticShapeBattleHook = true
+  end
+
+  -- WHICH SIDE IS SWINGING, which the engine knows and does not keep.
+  --
+  -- AnimPlayer:start is handed attackerIsPlayer and uses it to build the
+  -- steps, then lets it go. The staged fight needs it afterwards: a move
+  -- animation is a flat GB overlay and standing it in the world means
+  -- choosing a DEPTH for it, and the right depth is the mon it is landing on.
+  -- Wrapped rather than patched into the engine, like every other seam here.
+  do
+    local okA, AnimPlayer = pcall(require, "src.battle.AnimPlayer")
+    if okA and AnimPlayer and not AnimPlayer.dramaticShapeSideHook then
+      local innerStart = AnimPlayer.start
+      function AnimPlayer:start(moveId, attackerIsPlayer, opts)
+        OverworldBattle.animAttacker = attackerIsPlayer and true or false
+        return innerStart(self, moveId, attackerIsPlayer, opts)
+      end
+      AnimPlayer.dramaticShapeSideHook = true
+    end
   end
 
   local BattleState = require("src.battle.BattleState")

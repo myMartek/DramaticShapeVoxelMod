@@ -232,7 +232,7 @@ BattleScene.monCards = monCards
 -- Reads Voxel3D.eye at CALL time, like the cards -- call it per eye.
 -- Returns the model matrix for BattleBillboard's unit card (x -0.5..0.5,
 -- y 0..1 up, v flipped), or nil where the anchors are degenerate.
-function BattleScene.fxCard(arena, groundY, anchors)
+function BattleScene.fxCard(arena, groundY, anchors, defender)
   local p, e = anchors.player, anchors.enemy
   local dgb = e[1] - p[1]
   if math.abs(dgb) < 1 then return nil end
@@ -240,7 +240,26 @@ function BattleScene.fxCard(arena, groundY, anchors)
   local Px, Py, Pz = arena.player[1], groundY, arena.player[2]
   local Ex, Ey, Ez = arena.enemy[1], groundY, arena.enemy[2]
   local s = BattleBillboard.FULL_W / BattleBillboard.FULL_PIC
+  -- THE PLANE STANDS WHERE THE MOVE IS LANDING, not between the two.
+  --
+  -- ux and uy are solved from both marks, so whichever plane this is, both
+  -- mons land exactly on it -- that part was always right. What is NOT solved
+  -- is the vertical scale: `s` is world units per pic pixel, one number for
+  -- the whole card. On a billboard that is only true at the plane's own
+  -- depth, and the near end -- always the player's mon -- is closer to the
+  -- eye and therefore bigger. Held to the midpoint's scale, everything at
+  -- that end came out too low, and an enemy's attack landed in the floor
+  -- while the player's own looked right.
+  --
+  -- `s` is the scale the MON CARDS themselves stand at, so anchoring the
+  -- plane on a mon's own cell makes the overlay share that mon's scale
+  -- exactly. The defender is the one the animation is happening to.
   local Mx, My, Mz = (Px + Ex) / 2, groundY, (Pz + Ez) / 2
+  if defender == "player" then
+    Mx, Mz = Px, Pz
+  elseif defender == "enemy" then
+    Mx, Mz = Ex, Ez
+  end
 
   local eye = Voxel3D.eye
   local yaw = BattleBillboard.yawToward(Mx, Mz, eye)
