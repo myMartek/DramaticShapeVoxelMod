@@ -49,6 +49,14 @@ local V = ...
 -- silent right after claim" were this and not the mod.
 pcall(function() io.stdout:setvbuf("line") end)
 
+-- The one path a headset will not tell you from outside: devicectl reports the
+-- BUNDLE container and never the data one, and POKEPORT_DRIVER is loaded with
+-- a raw loadfile. It also CHANGES on some reinstalls, which is worth catching
+-- early -- a stale one does not fall back, it throws on boot.
+pcall(function()
+  print("[DRAMATIC_SHAPE] save dir: " .. love.filesystem.getSaveDirectory())
+end)
+
 
 local GfxCaps = V.require("GfxCaps")
 local ModSetting = V.require("ModSetting")
@@ -580,6 +588,9 @@ local function renderWorld(views, ctl)
   if (menu or not hand) and VRXR.hasQuadLayer == false then
     hand = heldPose(views[1].pose)
   end
+  -- Cleared every frame and set again below only where it applies: a flag
+  -- that survives the frame it was decided in is a flag that is wrong as soon
+  -- as the player closes the menu.
   if hand and (battle or fp or menu) then
     Pokedex.place(hand, pivot, anchor, scale, mountYaw, ctl and ctl.poseKind)
     if uiShowing() then
@@ -592,10 +603,55 @@ local function renderWorld(views, ctl)
       -- than a menu inside a picture of the world.
       local scr = nil
       if VRXR.hasQuadLayer == false then
+        -- THE WORLD BEHIND THE MENU, the way Windows shows it.
+        --
+        -- There the screen carries the window's front buffer, so the device
+        -- in your hand holds a picture of what you are looking at. There is
+        -- no front buffer here, and the eye is not a substitute for one --
+        -- the pokedex is drawn INTO the eye, so a finished eye on its own
+        -- screen is a tunnel of receding copies.
+        --
+        -- So the copy is taken inside the eye pass instead, one call before
         local okG, Game = pcall(require, "src.core.Game")
         local c = okG and Game.renderer and Game.renderer.canvas or nil
-        c = uiMipped(c)
-        if c then scr = { c, 0, 0, 1, 1 } end
+        -- THE RAW CANVAS, not the mipped copy.
+        --
+        -- uiMipped exists for the panel hanging a couple of metres away, where
+        -- a chain of mips is what keeps the text from crawling. This goes the
+        -- other way: 160x144 blown up onto a screen three times its size, and
+        -- the sampler then reaches for a high mip -- a fully averaged one is a
+        -- single colour, which is exactly what the device showed. Pale green,
+        -- the Game Boy's own background, averaged over the whole frame.
+        -- THE SECOND CAMERA IS THE FLAT ONE, and it already exists.
+        --
+        -- On Windows this screen carries a camera of its own -- fixed, not
+        -- steered by the head -- and it is the same picture the window shows.
+        -- The flat pass keeps running here beside the VR one (its own water
+        -- pass is in every log, at the virtual screen's size), so that camera
+        -- is being rendered every frame already and only needs reading.
+        --
+        -- No echo, either: the pokedex is drawn in the EYE pass alone, so the
+        -- virtual screen never contains it. That is what made the earlier
+        -- attempts recurse -- they reached for the eye, which is the one
+        -- picture the device is already inside of.
+        --
+        -- Cropped to the GB frame the way the Windows path crops the window:
+        -- everything the flat screen has to say lives in that letterbox, and
+        -- the rest is the mirror's picture.
+        local tex = VRXR.screenTexture and VRXR.screenTexture() or nil
+        if tex then
+          local ok2 = pcall(function()
+            local BattleScene = V.require("BattleScene")
+            local lx, ly, sc2 = BattleScene.letterbox()
+            local tw, th = tex:getWidth(), tex:getHeight()
+            local wpx = BattleScene.GB_W * sc2
+            local hpx = BattleScene.GB_H * sc2
+            if wpx > 0 and hpx > 0 and tw > 0 and th > 0 then
+              scr = { tex, lx / tw, ly / th, (lx + wpx) / tw, (ly + hpx) / th }
+            end
+          end)
+          if not ok2 or not scr then scr = { tex, 0, 0, 1, 1 } end
+        end
       else
         scr = dexScreen()
       end
