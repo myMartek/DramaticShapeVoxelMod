@@ -405,9 +405,10 @@ Water.RAY_THICK = 1.6
 Water.THICK_FLOOR = 2e-4
 
 -- How much of a hit survives at the END of the march. Tuned on the flat
--- screen; raising it to 0.6 to chase the missing tree reflections changed
--- nothing, so it is back where it was rather than carrying an unexplained
--- adjustment into the PC build.
+-- screen, and left there: raised to 0.6 twice, once under a broken march and
+-- once under a working one, and visibly nothing either time. That second null
+-- is worth keeping -- it says the tree reflections are NOT being faded out,
+-- they arrive at full strength and look the way they look for another reason.
 Water.RAY_FAR_FLOOR = 0.15
 
 -- Depth at or past which the buffer is holding nothing but the far plane --
@@ -426,6 +427,16 @@ Water.SKY_DEPTH = 0.999
 -- reasoning intact for whoever picks this up.
 Water.THICK_CONTINUE = false
 
+-- Flip the SCREEN POSITION the march computes, rather than the texture reads
+-- that use it. See the note in project().
+--
+-- This is the same root the Y-flip branch was opened for: the mod's clip-space
+-- convention and the renderer's disagree, and every place that turns a clip
+-- position into a texture lookup has to know. MIRROR_ROW_FLIP was that
+-- knowledge applied to one lookup out of two; this is it applied where the
+-- position is made, so the depth lookup and the colour lookup cannot disagree.
+Water.PROJECT_ROW_FLIP = true
+
 -- Whether the mirror is sampled with v turned over -- IN THE HEADSET ONLY.
 --
 -- Measured, both ways round: with the flip, VR is right and the flat window
@@ -440,7 +451,7 @@ Water.THICK_CONTINUE = false
 -- storage-row-preserving with no Y flip for either. So this flag is a measured
 -- fact with an unexplained cause, and it is written down as one rather than
 -- dressed in a mechanism that is not there.
-Water.MIRROR_ROW_FLIP = true
+Water.MIRROR_ROW_FLIP = false
 Water.EDGE_FADE = 0.14         -- reflection eased off over this much of the frame
 
 -- How much of a screen-space hit survives in STEREO, where the same hit may
@@ -593,6 +604,7 @@ uniform float farFloor;
 uniform float skyDepth;
 uniform float leanMarch;
 uniform float thickContinue;
+uniform float projFlip;
 // Mode 1 alone paints the march's exits. It used to be "any debug mode", and
 // that made mode 4 -- which asks the march for the COLOUR it found -- get the
 // exit codes back instead, so it could only ever confirm what mode 1 already
@@ -898,7 +910,25 @@ vec4 project(vec3 p) {
   p.y -= bendDrop(p.xz);
   vec4 c = vp * vec4(p, 1.0);
   if (c.w <= 1e-6) return vec4(0.0, 0.0, 0.0, 0.0);
-  return vec4(c.xy / c.w * 0.5 + 0.5, c.z / c.w * 0.5 + 0.5, 1.0);
+  vec2 uv = c.xy / c.w * 0.5 + 0.5;
+  // THE MOD'S CONVENTION IS NOT THE RASTERISER'S.
+  //
+  // vp carries the mod-wide clip-space Y flip (Voxel3D premultiplies
+  // scale(1,-1,1) so it reproduces the inversion LOVE applies to canvas
+  // projections). That flip is right for OpenGL and wrong for Metal, where it
+  // is compensated at the very end of the pipeline -- for the picture. It is
+  // NOT compensated for anything that computes a screen position and then goes
+  // looking in a texture with it, which is exactly what this does.
+  //
+  // The water's own occlusion test never noticed, because it uses `sc`, the
+  // real fragment coordinate, in the rasteriser's own convention. Two tests,
+  // two conventions, and the working one was taken as proof for the other.
+  //
+  // Done HERE rather than at the lookups so depth and colour cannot drift
+  // apart: one flip, one place, and everything downstream reads the same
+  // screen the hardware actually wrote.
+  if (projFlip > 0.5) uv.y = 1.0 - uv.y;
+  return vec4(uv, c.z / c.w * 0.5 + 0.5, 1.0);
 }
 
 // Walk the reflected ray until it passes behind the depth buffer. Returns
@@ -1549,6 +1579,8 @@ function Water.begin(ctx)
   send("rateLookup", ctx.rateMap or ctx.depth)
   send("useRateLookup", ctx.rateMap and 1 or 0)
   send("colorRate", (ctx.rateMap and Water.REFLECT_RATE) and 1 or 0)
+  send("projFlip", (Water.PROJECT_ROW_FLIP and ctx.stereo
+                     and GfxCaps.rowsFlipped()) and 1 or 0)
   send("thickContinue", Water.THICK_CONTINUE and 1 or 0)
   send("leanMarch", Water.LEAN_MARCH and 1 or 0)
   send("skyDepth", Water.SKY_DEPTH)
