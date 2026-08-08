@@ -430,6 +430,14 @@ Water.THICK_CONTINUE = false
 -- Flip the SCREEN POSITION the march computes, rather than the texture reads
 -- that use it. See the note in project().
 --
+-- STILL NEEDED after the clip-space flip was removed at its root, which the
+-- root repair predicted it would not be. Measured both ways on the branch:
+-- without it the reflection travels mirrored as the head pitches, exactly as
+-- before. So the march is reading a surface whose rows do not follow vp even
+-- when vp has stopped flipping -- and that is a fact about the water's own
+-- textures, not about the scene's projection. Left in, honestly labelled,
+-- rather than removed on a theory the device contradicts.
+--
 -- This is the same root the Y-flip branch was opened for: the mod's clip-space
 -- convention and the renderer's disagree, and every place that turns a clip
 -- position into a texture lookup has to know. MIRROR_ROW_FLIP was that

@@ -36,6 +36,25 @@ local DayNight = V.require("DayNight")
 local GlassMask = V.require("GlassMask")
 local PixelCanvas = V.require("PixelCanvas")
 
+-- The clip-space Y flip, applied only where LOVE itself applies one.
+--
+-- The mod bypasses LOVE's transform_projection, so it has to reproduce the Y
+-- inversion LOVE puts on canvas projections. LOVE does that on OpenGL and NOT
+-- on Metal, whose render targets are top-left already. Applied unconditionally
+-- -- as it was -- the frame comes out mirrored on Metal and every consumer
+-- has to know: the eye blit turned it back, the sky ray was reversed, the sun
+-- disc's row was inverted, the shadow map's lookup was flipped, and the
+-- water's march addressed the depth buffer in a convention the rasteriser
+-- never used. Five compensations for one mirror, each written the day its own
+-- bug surfaced, and the sixth site was always going to forget.
+--
+-- Conditional, there is no mirror to compensate and all five are deleted.
+local function flipY(proj)
+  if GfxCaps.rowsFlipped() then return proj end
+  return Mat4.mul(Mat4.scale(1, -1, 1), proj)
+end
+
+
 local Voxel3D = {}
 
 -- Vertex format shared by terrain chunks and character models: a position,
@@ -527,7 +546,7 @@ function Voxel3D.viewProjection(cx, cy, vw, vh)
       Voxel3D.fovY = cam.fov
       -- the VR eyes bring their fan with them (VRRig.eyeCamera)
       Voxel3D.skyRayLive = cam.skyRay
-      return Mat4.mul(Mat4.mul(Mat4.scale(1, -1, 1), cam.proj), cam.view)
+      return Mat4.mul(flipY(cam.proj), cam.view)
     end
     local dx = eye[1] - focus[1]
     local dy = eye[2] - focus[2]
@@ -539,9 +558,7 @@ function Voxel3D.viewProjection(cx, cy, vw, vh)
     Voxel3D.fovY = cam.fov
     local proj = Mat4.perspective(cam.fov, vw / vh,
                                   math.max(1, dist * 0.05), dist * 4 + 4096)
-    -- the same clip-space Y flip the orbit needs, for the same reason: we
-    -- bypass LOVE's transform_projection and canvas coordinates run Y down
-    proj = Mat4.mul(Mat4.scale(1, -1, 1), proj)
+    proj = flipY(proj)
     -- The camera's RAY FAN, for the sky's skybox path (Sky.paint's `ray`):
     -- a placed camera with a FREE PITCH -- the first-person rig, steered
     -- by a mouse on the flat screen -- must not hang its gradient off the
@@ -610,7 +627,7 @@ function Voxel3D.viewProjection(cx, cy, vw, vh)
   -- vertically mirrored: north at the bottom and buildings extruding
   -- downward. Winding flips with it, which is free here because the pass
   -- draws with culling off.
-  proj = Mat4.mul(Mat4.scale(1, -1, 1), proj)
+  proj = flipY(proj)
   return Mat4.mul(proj, Mat4.lookAt(eye, focus, up))
 end
 
@@ -832,7 +849,6 @@ local function drawWorldDisc(w, h)
     -- the two disagree in exactly one axis and the body slides up and down
     -- with the head while the sky stays put.
     local row = y / ww * 0.5 + 0.5
-    if Voxel3D.skyRayLive and GfxCaps.rowsFlipped() then row = 1 - row end
     verts[i] = { (x / ww * 0.5 + 0.5) * w, row * h, c[3], c[4] }
   end
   pcall(function()
