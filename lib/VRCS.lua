@@ -425,70 +425,12 @@ VRCS.handInput = handInput
 -- To a FILE as well as the console, because a --console launch only exists
 -- while it is attached, and attaching one means killing whatever session is
 -- being measured.
--- Whatever SDL currently has, named, once per change.
-local padsSeen = nil
-
-local function logPads(pads)
-  local names = {}
-  for _, pad in ipairs(pads) do
-    local okn, n = pcall(pad.getName, pad)
-    local okg, isPad = pcall(pad.isGamepad, pad)
-    local oka, ax = pcall(pad.getAxisCount, pad)
-    local okb, bt = pcall(pad.getButtonCount, pad)
-    names[#names + 1] = string.format("%s (gamepad=%s axes=%d buttons=%d)",
-      (okn and n) or "?", tostring(okg and isPad), (oka and ax) or -1,
-      (okb and bt) or -1)
-  end
-  local line = #names > 0 and table.concat(names, " | ") or "none"
-  if line ~= padsSeen then
-    padsSeen = line
-    print("[DRAMATIC_SHAPE] SDL joysticks: " .. line)
-  end
-end
-
-local GP_AXES = { "leftx", "lefty", "rightx", "righty",
-                  "triggerleft", "triggerright" }
-local axisSeen = {}
-local axisLines = {}
-
-local function logAxes(pads)
-  for i, pad in ipairs(pads) do
-    local okc, n = pcall(pad.getAxisCount, pad)
-    local raw = {}
-    for a = 1, (okc and n) or 0 do
-      local ok, v = pcall(pad.getAxis, pad, a)
-      raw[a] = (ok and type(v) == "number") and v or 0
-    end
-    local named = {}
-    for _, name in ipairs(GP_AXES) do
-      local ok, v = pcall(pad.getGamepadAxis, pad, name)
-      if ok and type(v) == "number" and math.abs(v) > 0.2 then
-        named[#named + 1] = string.format("%s=%.2f", name, v)
-      end
-    end
-
-    local prev = axisSeen[i]
-    local moved = prev == nil
-    if not moved then
-      for a = 1, #raw do
-        if math.abs(raw[a] - (prev[a] or 0)) > 0.2 then moved = true break end
-      end
-    end
-    if moved then
-      axisSeen[i] = raw
-      local parts = {}
-      for a = 1, #raw do parts[a] = string.format("%d:%+.2f", a, raw[a]) end
-      local line = string.format("pad %d raw %s%s", i,
-        table.concat(parts, " "),
-        #named > 0 and ("  named " .. table.concat(named, " ")) or "")
-      print("[DRAMATIC_SHAPE] " .. line)
-      axisLines[#axisLines + 1] = line
-      if #axisLines > 400 then table.remove(axisLines, 1) end
-      pcall(love.filesystem.write, "vr_axes.log",
-            table.concat(axisLines, "\n") .. "\n")
-    end
-  end
-end
+-- The SDL joystick diagnostics that lived here are gone. They answered their
+-- question -- SDL enumerates the Sense pair as two devices and leaves every
+-- named axis at zero, so the sticks come from GameController instead -- and
+-- then kept printing a line and rewriting a file on every frame a stick moved.
+-- That is enough log traffic for the visionOS simulator to quarantine the app.
+-- A probe that has answered is a probe that should be deleted.
 
 -- ------- the Sense controllers
 --
@@ -539,8 +481,6 @@ end
 local function padSticks()
   local ok, pads = pcall(love.joystick.getJoysticks)
   if not ok or type(pads) ~= "table" then return nil end
-  pcall(logPads, pads)
-  pcall(logAxes, pads)
 
   local list = {}
   for _, p in ipairs(pads) do
