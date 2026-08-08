@@ -820,6 +820,66 @@ end
 -- placement, so the pic lands centred on a known column with its feet on a
 -- known row. That known point is what the quad is then hung from.
 local TEX_AX, TEX_AY = 80, 96          -- forced pic centre and baseline
+
+-- THE FULL-LENGTH BACK PIC, for the card in the world only.
+--
+-- Gen 1's own back pic is a half figure: 32x32 with 28x28 of content, ending
+-- at the waist. On hardware the text box sits directly under it, so nobody
+-- ever saw an edge -- but standing in a world it is a man cut in half, and
+-- that is what "Ash is cut off" was. Not a clipping bug anywhere: the art has
+-- no lower half.
+--
+-- Used ONLY when texturing the quad. The flat battle screen keeps the
+-- original, so the GB picture stays exactly what it always was.
+local fullBack = nil
+local fullBackTried = false
+local function fullBackPic()
+  if fullBackTried then return fullBack end
+  fullBackTried = true
+  -- The mod namespace carries no path to itself and this mod has never loaded
+  -- a file of its own before (its art is all built in code), so the mount
+  -- point is asked rather than assumed: whichever of these the engine has the
+  -- mod under, one of them opens.
+  local REL = "assets/player_back_full.png"
+  local tries = {
+    "mods/DRAMATIC_SHAPE/" .. REL,
+    "DRAMATIC_SHAPE/" .. REL,
+    REL,
+  }
+  for _, path in ipairs(tries) do
+    local ok, img = pcall(function()
+      local id = love.image.newImageData(path)
+      -- THE ENGINE'S OWN PALETTE, applied the engine's own way.
+      --
+      -- Pics are two-bit art and the colour arrives at LOAD time: getImage
+      -- maps the four greys onto a named palette by thresholds in the red
+      -- channel. Drawn without that step this sprite stays grey while every
+      -- other pic on the canvas is in colour, which is exactly how it looked.
+      -- The thresholds and the palette name are copied from BattleState so
+      -- the two cannot drift apart quietly.
+      local okP, PaletteFX = pcall(require, "src.render.PaletteFX")
+      local c = okP and PaletteFX.pal(V.data, "MEWMON") or nil
+      if c then
+        id:mapPixel(function(_, _, r, g, b, a)
+          if a == 0 then return r, g, b, a end
+          local col = r > 0.83 and c[1] or r > 0.5 and c[2]
+                      or r > 0.17 and c[3] or c[4]
+          return col[1] / 255, col[2] / 255, col[3] / 255, a
+        end)
+      end
+      return love.graphics.newImage(id)
+    end)
+    if ok and img then
+      pcall(img.setFilter, img, "nearest", "nearest")
+      fullBack = img
+      break
+    end
+  end
+  if not fullBack then
+    print("[DRAMATIC_SHAPE] full back pic not found; the half figure stands")
+  end
+  return fullBack
+end
 local TRAINER_AX, TRAINER_AY = 124, 56 -- the intro trainer pic's own slot
 
 OverworldBattle.TEX_AX, OverworldBattle.TEX_AY = TEX_AX, TEX_AY
@@ -896,7 +956,17 @@ function OverworldBattle.sideTexture(battle, side)
     g.clear(0, 0, 0, 0)
     g.setBlendMode("alpha")
     g.setColor(1, 1, 1, 1)
-    innerPics(battle, 0, 0, 0)
+    local full = (side == "player" and battle.showPlayerBack
+                  and battle.playerBackPic) and fullBackPic() or nil
+    if full then
+      -- Centred on the same mark, feet on the same line, drawn 1:1 like every
+      -- other pic on this canvas -- so the card's own anchor arithmetic needs
+      -- no exception and the torso keeps the size it had.
+      local fw, fh = full:getWidth(), full:getHeight()
+      g.draw(full, TEX_AX - fw / 2, TEX_AY - fh)
+    else
+      innerPics(battle, 0, 0, 0)
+    end
   end)
 
   texturing = nil
@@ -916,6 +986,7 @@ function OverworldBattle.sideTexture(battle, side)
   elseif side == "player" and battle.showPlayerBack and battle.playerBackPic then
     trainer = true
   end
+
   return { canvas = canvas, ax = ax, ay = ay, trainer = trainer }
 end
 
