@@ -453,18 +453,6 @@ end
 -- Kept here rather than in VRRig, which is deliberately platform-free and
 -- stays that way.
 
--- Turn a sky ray fan over in v: the far end becomes the base and the step
--- reverses. base + 1*dv is the v = 1 edge, so that is the new v = 0.
-local function flipSkyRay(ray)
-  if not (ray and ray.base and ray.dv) then return ray end
-  return {
-    base = { ray.base[1] + ray.dv[1],
-             ray.base[2] + ray.dv[2],
-             ray.base[3] + ray.dv[3] },
-    du = ray.du,
-    dv = { -ray.dv[1], -ray.dv[2], -ray.dv[3] },
-  }
-end
 
 local function renderWorld(views, ctl)
   local ok, Game = pcall(require, "src.core.Game")
@@ -623,9 +611,6 @@ local function renderWorld(views, ctl)
         local cam = VRRig.eyeCamera(v.pose, v.fov, pivot, anchor, scale, mountYaw)
         -- The sun stays where it is when the head nods, instead of riding
         -- along with it, once the fan agrees with the canvas it is read in.
-        if cam and cam.skyRay and GfxCaps.rowsFlipped() then
-          cam.skyRay = flipSkyRay(cam.skyRay)
-        end
         return cam
       end)(),
       -- visionOS lends a foveated intermediary whose reported dimensions are

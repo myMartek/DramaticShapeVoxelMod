@@ -169,6 +169,15 @@ local TO_UNIT = { 0.5, 0, 0, 0.5,
 -- The same, with v turned over, for renderers whose canvas rows run the other
 -- way from OpenGL's.
 --
+-- NOT touched by the clip-space-flip repair, deliberately. That repair is
+-- about the orientation of the SCENE canvas -- what the eye sees and what
+-- anything sampling the frame has to address. This map is a closed pair: it is
+-- written by the fill pass and read by uvVP, and the only requirement is that
+-- those two agree with each other. They already did. Turning both sides over
+-- at once, as the first attempt at the repair did, left them agreeing about
+-- the wrong rows -- one enormous shadow sliding with the head, which is the
+-- same symptom the original bug had.
+--
 -- This map is WRITTEN by the rasteriser and READ by arithmetic, and only the
 -- writer knows which row a clip-space y lands in. On OpenGL the two agree. On
 -- Metal a render target is top-left origin, so the fill pass puts a caster in
