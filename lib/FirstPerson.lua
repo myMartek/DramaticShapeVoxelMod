@@ -99,6 +99,10 @@ FirstPerson.MOVE_DEAD = 0.25
 -- faces), pi/2 east -- the same convention VoxelScene.YAW uses, so a
 -- facing converts to a yaw by table lookup.
 FirstPerson.yaw = 0
+
+-- Read once: getenv per frame for a diagnostic is not worth it.
+local FP_PIN_YAW   = tonumber(os.getenv("DRAMATIC_SHAPE_YAW") or "")
+local FP_PIN_PITCH = tonumber(os.getenv("DRAMATIC_SHAPE_PITCH") or "")
 FirstPerson.pitch = FirstPerson.PITCH_DEFAULT
 FirstPerson.blend = 0
 
@@ -342,6 +346,17 @@ function FirstPerson.update(dt)
     FirstPerson.pitch = FirstPerson.PITCH_DEFAULT
   end
   wasEngaged = engagedNow
+
+  -- DIAGNOSTIC: DRAMATIC_SHAPE_YAW / _PITCH pin the head, in radians.
+  --
+  -- The flat window is the only place the water's reflections are known to be
+  -- right, which makes it the reference every VR reflection question has to be
+  -- answered against -- and answering means the SAME view in both, not two
+  -- pictures of different walls. The yaw is set from the sprite's facing once,
+  -- on entering (see above), and is the stick's after that, so there is no
+  -- other way to aim it from outside the headset.
+  if FP_PIN_YAW then FirstPerson.yaw = FP_PIN_YAW end
+  if FP_PIN_PITCH then FirstPerson.pitch = FP_PIN_PITCH end
 
   -- the blend, held at flat until there is terrain to dive into -- the
   -- same wait Voxel.update keeps for the orbit tween, for the same reason
