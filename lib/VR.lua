@@ -42,6 +42,14 @@
 -- the mod namespace (see main.lua): V.require loads a sibling module
 local V = ...
 
+-- LOVE leaves stdout fully buffered when it is a pipe rather than a terminal.
+-- On a headset every log is a pipe, and the last few kilobytes of one are
+-- therefore simply missing -- which is exactly the window in which VR claims
+-- the frame loop and either works or does not. Two rounds of "the mod goes
+-- silent right after claim" were this and not the mod.
+pcall(function() io.stdout:setvbuf("line") end)
+
+
 local GfxCaps = V.require("GfxCaps")
 local ModSetting = V.require("ModSetting")
 local Voxel = V.require("VoxelState")
@@ -162,6 +170,14 @@ VR.paletteFor = nil
 -- have no love.system and answer true, which costs nothing: enabling VR
 -- there stops at VRXR.start like it always did.
 function VR.supported()
+  -- DRAMATIC_SHAPE_VR=0 keeps the headset build on the FLAT path.
+  --
+  -- Every VR bug in this port has been diagnosed by asking "and what does the
+  -- flat window do with the same scene?", and until now answering that meant
+  -- somebody wearing the device reaching for the Digital Crown. This makes the
+  -- pair mechanical: run once with it and once without, compare the two
+  -- frames.
+  if os.getenv("DRAMATIC_SHAPE_VR") == "0" then return false end
   -- visionOS reports its OS as "iOS" on purpose (the engine port keeps every
   -- existing iOS branch working), so the backend's own answer is the reliable
   -- one and the OS string is only a fallback for the headless test suite.
@@ -414,6 +430,20 @@ end
 
 -- ------- the world, once per eye
 
+-- Why the world is not renderable, said once per distinct reason.
+--
+-- "the world is still building" is true of every failure here and useful for
+-- none of them: a missing overworld, a voxel mode that is off and a terrain
+-- mesh that never arrives all read the same. Each has a different fix.
+local lastWhy = nil
+
+local function sayWhy(why)
+  if why ~= lastWhy then
+    lastWhy = why
+    print("[DRAMATIC_SHAPE] world not renderable: " .. why)
+  end
+end
+
 -- Whether the world could be drawn RIGHT NOW.
 --
 -- Split out of renderWorld because the answer has to be known BEFORE the
@@ -429,17 +459,31 @@ end
 local function worldRenderable()
   local ok, Game = pcall(require, "src.core.Game")
   local ow = ok and Game.overworld or nil
-  if not (ow and ow.map and ow.camera and Voxel.active()
-          and Voxel3D.available()) then
+  if not ow then sayWhy("no overworld") return false end
+  if not ow.map then sayWhy("overworld has no map") return false end
+  if not ow.camera then sayWhy("overworld has no camera") return false end
+  if not Voxel.active() then
+    sayWhy("voxel mode is off (level " .. tostring(Voxel.level)
+           .. ", angle " .. string.format("%.2f", Voxel.angle or 0) .. ")")
     return false
   end
+  if not Voxel3D.available() then sayWhy("Voxel3D unavailable") return false end
   -- The meshes themselves, not just the modules: VoxelScene.render returns
   -- nil until the current map has terrain, and a nil frame is exactly the
   -- empty submission this is here to prevent.
   local okP, terrain = pcall(function()
     return (VoxelScene.prefetch(ow))
   end)
-  return okP and terrain ~= nil and terrain ~= false
+  if not okP then
+    sayWhy("prefetch raised: " .. tostring(terrain))
+    return false
+  end
+  if terrain == nil or terrain == false then
+    sayWhy("no terrain mesh yet")
+    return false
+  end
+  sayWhy("ready")
+  return true
 end
 
 -- Whether this renderer's canvases store the frame upside down.
@@ -598,12 +642,26 @@ local function renderWorld(views, ctl)
     end
   end
 
+  -- One eye per view the runtime actually offered, not two on faith. Every
+  -- headset hands over a pair, but the visionOS SIMULATOR's compositor layer
+  -- is mono -- one view, one colour texture -- and a loop counting to two read
+  -- views[2] as nil and took the whole voxel pipeline down with it, which is
+  -- why the simulator showed the flat game with VR switched on.
   local eyes = {}
-  for i = 1, 2 do
+  local nEyes = #views
+  for i = 1, nEyes do
     local v = views[i]
     local target = VRXR.eyeCanvas and VRXR.eyeCanvas(i) or nil
     local targetDepth = VRXR.eyeDepth and VRXR.eyeDepth(i) or nil
     local rateMap = VRXR.rateMap and VRXR.rateMap(i) or nil
+    local rateInv = VRXR.rateMapInverse and VRXR.rateMapInverse(i) or nil
+    -- SMOOTHLY, not in steps. The table is 256x256 against a logical field of
+    -- several thousand, so one texel spans twenty-odd pixels -- and the sky
+    -- decides its checker parity from atan() of the decoded direction, which
+    -- turns a stepped decode into a pattern that flips between neighbouring
+    -- pixels and between frames. The water never showed it because nothing it
+    -- computes is parity.
+    if rateInv then pcall(rateInv.setFilter, rateInv, "linear", "linear") end
     local pw, ph = nil, nil
     if VRXR.eyePhysicalSize then pw, ph = VRXR.eyePhysicalSize(i) end
     eyes[i] = {
@@ -623,6 +681,7 @@ local function renderWorld(views, ctl)
       target = target,
       depth = targetDepth,
       rateMap = rateMap,
+      rateInv = rateInv,
       physW = pw, physH = ph,
       -- Called by the water pass, which reads the frame in screen space and
       -- therefore needs the de-foveated snapshot rather than the packed
@@ -669,8 +728,18 @@ local function renderWorld(views, ctl)
       if sw and sw > 0 and pw and pw > 0 then density = pw / sw end
     end)
     if density <= 0 then density = 6 end
-    rw = math.max(vw, math.floor(views[1].w / density))
-    rh = math.max(vh, math.floor(views[1].h / density))
+    -- FROM THE PHYSICAL EYE, not the logical one.
+    --
+    -- A foveated eye REPORTS 6888x5525 while the texture behind it is
+    -- 2624x2560: the logical figure is the gaze-packed frame's notional
+    -- extent, not a count of pixels anybody draws. Taken literally it asks
+    -- for a world view 1148x920 world pixels wide instead of 437x427 --
+    -- nine times the area to mesh, light and draw -- and the headset's
+    -- watchdog killed the app on the first foveated frame (signal 9).
+    local ew = (eyes[1].physW and eyes[1].physW > 0) and eyes[1].physW or views[1].w
+    local eh = (eyes[1].physH and eyes[1].physH > 0) and eyes[1].physH or views[1].h
+    rw = math.max(vw, math.floor(ew / density))
+    rh = math.max(vh, math.floor(eh / density))
   end
 
 
@@ -683,9 +752,9 @@ local function renderWorld(views, ctl)
   local okR, canvases = pcall(VoxelScene.render, ow, 0, 0, rw, rh,
                               VR.paletteFor, eyes)
 
-  if not (okR and type(canvases) == "table" and canvases[1] and canvases[2])
-  then
-    return false
+  if not (okR and type(canvases) == "table") then return false end
+  for i = 1, nEyes do
+    if not canvases[i] then return false end
   end
 
   -- the snap's fade, over the finished eyes: plain black at this moment's
@@ -695,7 +764,7 @@ local function renderWorld(views, ctl)
   -- two frusta disagree about where any given pixel points.
   if fadeAlpha > 0 then
     pcall(function()
-      for i = 1, 2 do
+      for i = 1, nEyes do
         local c = canvases[i]
         love.graphics.setCanvas(c)
         love.graphics.setColor(0, 0, 0, math.min(1, fadeAlpha))
@@ -706,7 +775,7 @@ local function renderWorld(views, ctl)
     end)
   end
 
-  for i = 1, 2 do
+  for i = 1, nEyes do
     local canvas = canvases[i]
     -- Nothing to copy when the scene already drew into the compositor's own
     -- texture; VRGL is nil on that path in any case.

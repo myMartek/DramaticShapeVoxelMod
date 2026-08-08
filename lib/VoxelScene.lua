@@ -1216,7 +1216,7 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     if not Voxel3D.beginScene(eye.w, eye.h, cx, cy, vw, vh,
                               skyFor(state.map), eye.slot, eye.target,
                               eye.depth, eye.rateMap, eye.resolve,
-                              eye.physW, eye.physH) then
+                              eye.physW, eye.physH, eye.rateInv) then
       -- Cleared on the way out too. Leaving it set meant the next FLAT frame
       -- believed it was an eye and drew the panel into the virtual screen --
       -- the very picture the panel wears -- which is the tunnel of receding

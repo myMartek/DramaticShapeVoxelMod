@@ -240,6 +240,15 @@ function VRCS.eyePhysicalSize(i)
   return w, h
 end
 
+-- The packing read backwards: physical fraction in, logical out. Only the sky
+-- needs this direction -- see w_rateMapInverse.
+function VRCS.rateMapInverse(i)
+  if not available() or not love.xr.rateMapInverse then return nil end
+  local ok, tex = pcall(love.xr.rateMapInverse, i)
+  if not ok then return nil end
+  return tex
+end
+
 function VRCS.rateMap(i)
   if not available() or not love.xr.rateMap then return nil end
   local ok, map = pcall(love.xr.rateMap, i)
