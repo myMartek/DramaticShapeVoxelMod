@@ -849,6 +849,7 @@ local function drawWorldDisc(w, h)
     -- the two disagree in exactly one axis and the body slides up and down
     -- with the head while the sky stays put.
     local row = y / ww * 0.5 + 0.5
+    if GfxCaps.rowsFlipped() then row = 1 - row end
     verts[i] = { (x / ww * 0.5 + 0.5) * w, row * h, c[3], c[4] }
   end
   pcall(function()
@@ -878,7 +879,8 @@ end
 -- its matching readable physical-depth layout; both report logical screen
 -- dimensions to the shaders while the Metal rate map controls fragments.
 function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, target, targetDepth,
-                            targetRateMap, targetResolve, targetPhysW, targetPhysH)
+                            targetRateMap, targetResolve, targetPhysW, targetPhysH,
+                            targetRateInv)
   -- the wireframe variant when the player has it on AND it built; either
   -- answer falls through to the plain scene rather than to no scene
   local grid = VoxelGrid.enabled()
@@ -904,7 +906,9 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, target, targetDepth
       slots[name] = slotHeld
     end
     slotHeld.canvas = target
+    slotHeld.name = name
     slotHeld.rateMap = targetRateMap
+    slotHeld.rateInv = targetRateInv
     slotHeld.resolve = targetResolve
     slotHeld.physW = targetPhysW
     slotHeld.physH = targetPhysH
@@ -976,8 +980,11 @@ function Voxel3D.beginScene(w, h, cx, cy, vw, vh, sky, slot, target, targetDepth
     -- The banded sky also hangs the hour's sun or moon (skyBody projects it
     -- through this very camera); a flat sky has no bands and hangs nothing.
     if skyRay and sky.bands then
+      -- The fan needs to know which LOGICAL point each fragment stands on.
+      -- Under foveation the fragment's own position is packed, and a fan run
+      -- over the packing slides and tips with the gaze.
       Sky.paint(w, h, sky, nil, Voxel3D.cell, Voxel3D.skyBody(w, h),
-                nil, nil, skyRay)
+                nil, nil, skyRay, held.rateInv, held.physW, held.physH)
       drawWorldDisc(w, h)
     else
       Sky.paint(w, h, sky, hy, Voxel3D.cell,
@@ -1180,8 +1187,28 @@ function Voxel3D.beginWater(paint)
   -- That is the whole reason the water reflected nothing. The march found its
   -- crossings correctly and read the colour out of a picture that was black
   -- almost everywhere.
-  local mw = (held.physW and held.physW > 0) and held.physW or held.w
-  local mh = (held.physH and held.physH > 0) and held.physH or held.h
+  -- SIZED PHYSICALLY, and the copy therefore goes down WITHOUT the depth.
+  --
+  -- Under foveation the eye and its depth both REPORT the logical extent --
+  -- 5385x4320 against a texture of 2176x2080 -- because that is the space
+  -- LOVE sets its viewport in and the rate map turns it into the physical
+  -- raster. That is right, and it means anything sharing a pass with them
+  -- must be logical too. Sized that way the mirror is 93 MB an eye, 186 for
+  -- the pair, on top of two rgba16f eyes, their depths and four lookup
+  -- tables -- and at that point the two eyes stop behaving alike: the left
+  -- came back 81.8 per cent one colour while the right reflected.
+  --
+  -- The copy does not need the depth (measured: it produces the same picture
+  -- either way), so it does not take it, and the mirror is free to be the
+  -- size it actually wants -- a fifth of the memory. What DOES need it is the
+  -- paint below, and that step is skipped when the two cannot share a pass.
+  local mw, mh = held.w, held.h
+  if held.physW and held.physW > 0 then
+    mw, mh = held.physW, held.physH
+  end
+  -- whether `paint` can still test against the frame's own depth
+  local depthFits = held.depth
+    and held.depth:getWidth() == mw and held.depth:getHeight() == mh
   if not (held.mirror and held.mirrorW == mw and held.mirrorH == mh) then
     if held.mirror then pcall(held.mirror.release, held.mirror) end
     local ok, c = pcall(love.graphics.newCanvas, mw, mh)
@@ -1195,7 +1222,8 @@ function Voxel3D.beginWater(paint)
   -- the frame's own depth rides along, so the paint below can test against
   -- it; the copy underneath switches the test off rather than detaching it
   local ok = pcall(love.graphics.setCanvas,
-                   { held.mirror, depthstencil = held.depth })
+                   depthFits and { held.mirror, depthstencil = held.depth }
+                             or held.mirror)
   if not ok then
     pcall(love.graphics.setCanvas, depthTarget())
     return nil
@@ -1226,7 +1254,11 @@ function Voxel3D.beginWater(paint)
   love.graphics.draw(canvas, 0, 0, 0, mw / held.w, mh / held.h)
   love.graphics.setShader()
   love.graphics.setBlendMode("alpha")
-  if paint and activeShader then
+  -- Only with the frame's own depth under it. Without one the test would pass
+  -- everywhere, which is not "the water is drawn correctly" but "the water is
+  -- drawn over everything" -- and a mirror with the lake painted across the
+  -- buildings standing in it is worse than a mirror without the lake.
+  if paint and activeShader and depthFits then
     love.graphics.setDepthMode("lequal", false)
     love.graphics.setShader(activeShader)
     pcall(paint)
@@ -1239,15 +1271,18 @@ function Voxel3D.beginWater(paint)
     pcall(love.graphics.setCanvas, depthTarget())
     return nil
   end
-  -- The PACKED depth, addressed in physical pixels.
+  -- The packed depth, AND the table that addresses it.
   --
-  -- Under variable rasterization the water's own fragment coordinate is
-  -- already physical, and so is this buffer -- so the two index each other
-  -- directly and no rate-map conversion belongs anywhere in between. What was
-  -- missing is only the divisor: love_ScreenSize reports the LOGICAL size, and
-  -- dividing a physical coordinate by it reaches roughly a third of the way
-  -- across the frame.
-  return held.mirror, held.depth, nil, held.physW, held.physH
+  -- This handed back nil for a long stretch, on the reasoning that the water's
+  -- own fragment coordinate is physical and so is this buffer, so the two
+  -- index each other directly. True of the SELF test, which starts from the
+  -- fragment. False of the MARCH, which starts from project() -- a logical
+  -- position -- and read it as though it were physical. Without foveation the
+  -- two spaces coincide and nothing shows; with it the error follows the gaze,
+  -- and what the lake reflects changes as the head moves.
+  --
+  -- So: one space. Everything addresses logically, sceneDepthAt converts once.
+  return held.mirror, held.depth, held.rateMap, held.physW, held.physH
 end
 
 -- Put the frame back: depth reattached, depth test and the scene shader as
