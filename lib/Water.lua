@@ -175,6 +175,13 @@ Water.LEAN_FULL = 0.55         -- and where it is complete
 -- stated as that same descent so the two cannot drift apart
 Water.LEAN_ELEV = math.asin(Water.LEAN_FROM)
 
+-- Whether the lean also tips the SCREEN-SPACE MARCH, or only the sky and the
+-- celestial bodies it was written for. False: see the note beside rTrue in the
+-- shader. Kept as a switch because it is a look decision as much as a
+-- correctness one -- with it off, a steeply pitched view gets honest geometry
+-- reflections, which sit closer to the shoreline than the leaned ones did.
+Water.LEAN_MARCH = false
+
 function Water.lean(descent)
   local span = Water.LEAN_FULL - Water.LEAN_FROM
   local t = ((descent or 0) - Water.LEAN_FROM) / span
@@ -407,6 +414,24 @@ Water.RAY_FAR_FLOOR = 0.15
 -- the sky. A crossing there is not a surface to reflect, it is the end of the
 -- world, and the march steps over it instead of landing on it.
 Water.SKY_DEPTH = 0.999
+
+-- Whether the mirror is sampled with v turned over -- IN THE HEADSET ONLY.
+--
+-- Measured, both ways round: with the flip, VR is right and the flat window
+-- loses its tree reflections; without it, the window is right and VR's
+-- reflection travels mirrored as the head pitches. Both views are Metal, so
+-- "is this Metal" was the wrong question to hang it on.
+--
+-- What actually differs is what the scene was drawn INTO. The flat path renders
+-- to a canvas LOVE created itself (PixelCanvas, via Voxel3D's own slot); the VR
+-- path renders into a texture the compositor owns, adopted through
+-- newTextureFromHandle in the engine port. LOVE knows the orientation of the
+-- one it made and inherits whatever the other one has. That is a per-PATH
+-- fact, not a per-renderer one, which is why the renderer test broke a view it
+-- had no business touching.
+--
+-- Bound to stereo as the honest proxy for "the eye textures are borrowed".
+Water.MIRROR_ROW_FLIP = true
 Water.EDGE_FADE = 0.14         -- reflection eased off over this much of the frame
 
 -- How much of a screen-space hit survives in STEREO, where the same hit may
@@ -557,6 +582,7 @@ uniform float colorRate;
 uniform float rowFlip;
 uniform float farFloor;
 uniform float skyDepth;
+uniform float leanMarch;
 // Mode 1 alone paints the march's exits. It used to be "any debug mode", and
 // that made mode 4 -- which asks the march for the COLOUR it found -- get the
 // exit codes back instead, so it could only ever confirm what mode 1 already
@@ -1236,6 +1262,19 @@ vec4 effect(mediump vec4 color, Image tex, mediump vec2 tc, mediump vec2 sc) {
   // The ray keeps its own BEARING and is only tipped in elevation, so a
   // reflection still points where the water is pointing it -- and a ray so
   // near vertical that it has no bearing left borrows the camera's.
+  // The TRUE reflection, kept before the lean tips it.
+  //
+  // The lean is a stylistic device: at a steep look it pins the reflection to
+  // the elevation the top rung sits at, so the sky's bands, the sunset and the
+  // moon's path stay where they read well instead of collapsing into the
+  // shoreline. For those it is right. For the screen-space march it is not --
+  // that one reflects real geometry, and a ray pinned at 17.5 degrees climbs
+  // so slowly it can only reach a tree from water a few tiles away. Every
+  // fragment beyond that overflies the canopy into sky, which the march skips,
+  // and comes back a miss. That is the black band where tree reflections
+  // belong, and it is why the flat window is correct: its top rung sits just
+  // under the lean's threshold, so nothing is tipped there at all.
+  vec3 rTrue = r;
   if (lean > 0.0) {
     float fl = length(rFlat.xz);
     vec3 bearing = (fl > 1e-3) ? vec3(rFlat.x / fl, 0.0, rFlat.z / fl)
@@ -1277,7 +1316,7 @@ vec4 effect(mediump vec4 color, Image tex, mediump vec2 tc, mediump vec2 sc) {
   // no trees here means the ray never lands on them at all.
   if (debugRays > 3.5) {
     if (rays > 0.5) {
-      vec4 hit = march(surf, r);
+      vec4 hit = march(surf, leanMarch > 0.5 ? r : rTrue);
       return vec4(hit.a > 0.0 ? hit.rgb : vec3(0.0), 1.0) * color;
     }
     return vec4(0.0, 0.0, 0.0, 1.0) * color;
@@ -1302,7 +1341,7 @@ vec4 effect(mediump vec4 color, Image tex, mediump vec2 tc, mediump vec2 sc) {
     return vec4(scene, selfC.z, 0.0, 1.0) * color;
   }
   if (rays > 0.5) {
-    vec4 hit = march(surf, r);
+    vec4 hit = march(surf, leanMarch > 0.5 ? r : rTrue);
     if (exitMap) return vec4(hit.rgb, 1.0) * color;
     refl = mix(refl, hit.rgb, hit.a);
   }
@@ -1473,9 +1512,11 @@ function Water.begin(ctx)
   send("rateLookup", ctx.rateMap or ctx.depth)
   send("useRateLookup", ctx.rateMap and 1 or 0)
   send("colorRate", (ctx.rateMap and Water.REFLECT_RATE) and 1 or 0)
+  send("leanMarch", Water.LEAN_MARCH and 1 or 0)
   send("skyDepth", Water.SKY_DEPTH)
   send("farFloor", Water.RAY_FAR_FLOOR)
-  send("rowFlip", GfxCaps.rowsFlipped() and 1 or 0)
+  send("rowFlip", (Water.MIRROR_ROW_FLIP and ctx.stereo
+                   and GfxCaps.rowsFlipped()) and 1 or 0)
   send("thickFloor", Water.THICK_FLOOR)
   send("debugRays", tonumber(Water.DEBUG_RAYS) or (Water.DEBUG_RAYS and 1 or 0))
 

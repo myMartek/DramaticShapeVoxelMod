@@ -1882,7 +1882,11 @@ T.check(gridded:find("columnSeam(hit, sheet, axis)", 1, true) ~= nil,
 T.check(gridded:find("vec3 w = fwidth(base);", 1, true) ~= nil,
   "measured off the smooth plane, because the hit jumps a whole column "
   .. "between neighbouring fragments and its own derivative is a step")
-T.check(plain:find("march(surf, r)", 1, true) ~= nil,
+-- The first argument is the whole of this claim. The second is the ray's
+-- DIRECTION, which the horizon lean may or may not have tipped (see
+-- Water.LEAN_MARCH) -- pinning the literal text of that one made this fail on
+-- a change it was never about.
+T.check(plain:find("march(surf,", 1, true) ~= nil,
   "the reflection marches from that column, not from the raw fragment")
 -- The two halves of the world curve, and they pull opposite ways. WHAT the
 -- lake reflects is worked out FLAT -- the same rule the rest of the mode
