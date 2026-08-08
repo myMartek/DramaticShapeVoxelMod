@@ -415,6 +415,17 @@ Water.RAY_FAR_FLOOR = 0.15
 -- world, and the march steps over it instead of landing on it.
 Water.SKY_DEPTH = 0.999
 
+-- Whether a crossing rejected as too thick lets the ray CARRY ON rather than
+-- ending it.
+--
+-- The argument for true is in the note at the test itself and I still think it
+-- is sound -- disbelieving a crossing is not a reason to abandon the ray. But
+-- it did not bring the missing reflections back, and the smear guard is
+-- something the mod's author tuned deliberately. An unverified change that
+-- fixes nothing does not belong in a shipped path, so it stays off with its
+-- reasoning intact for whoever picks this up.
+Water.THICK_CONTINUE = false
+
 -- Whether the mirror is sampled with v turned over -- IN THE HEADSET ONLY.
 --
 -- Measured, both ways round: with the flip, VR is right and the flat window
@@ -422,15 +433,13 @@ Water.SKY_DEPTH = 0.999
 -- reflection travels mirrored as the head pitches. Both views are Metal, so
 -- "is this Metal" was the wrong question to hang it on.
 --
--- What actually differs is what the scene was drawn INTO. The flat path renders
--- to a canvas LOVE created itself (PixelCanvas, via Voxel3D's own slot); the VR
--- path renders into a texture the compositor owns, adopted through
--- newTextureFromHandle in the engine port. LOVE knows the orientation of the
--- one it made and inherits whatever the other one has. That is a per-PATH
--- fact, not a per-renderer one, which is why the renderer test broke a view it
--- had no business touching.
---
--- Bound to stereo as the honest proxy for "the eye textures are borrowed".
+-- WHY it is per-path is not established. The first explanation offered here --
+-- that an adopted compositor texture and a LOVE-made canvas are drawn
+-- differently -- does not survive reading the engine: newTextureFromHandle
+-- wraps the MTLTexture and nothing else, and LOVE's 2D blit is
+-- storage-row-preserving with no Y flip for either. So this flag is a measured
+-- fact with an unexplained cause, and it is written down as one rather than
+-- dressed in a mechanism that is not there.
 Water.MIRROR_ROW_FLIP = true
 Water.EDGE_FADE = 0.14         -- reflection eased off over this much of the frame
 
@@ -583,6 +592,7 @@ uniform float rowFlip;
 uniform float farFloor;
 uniform float skyDepth;
 uniform float leanMarch;
+uniform float thickContinue;
 // Mode 1 alone paints the march's exits. It used to be "any debug mode", and
 // that made mode 4 -- which asks the march for the COLOUR it found -- get the
 // exit codes back instead, so it could only ever confirm what mode 1 already
@@ -936,8 +946,35 @@ vec4 march(vec3 origin, vec3 dir) {
       // how much depth this one step covered: the yardstick for whether
       // the crossing is a surface or a thin thing the ray shot past
       float span = max(abs(pb.z - pa.z), thickFloor);
-      if (pb.z - scene > span * rayThick)
-        return (exitMap) ? debugExit(vec3(1.0, 0.55, 0.0)) : miss;
+      if (pb.z - scene > span * rayThick) {
+        // NOT A HIT -- AND NOT THE END EITHER.
+        //
+        // This test says the crossing is too deep to be a surface the ray
+        // landed on: it went behind something thin rather than onto it. That
+        // is a reason to disbelieve THIS crossing, and it was being used as a
+        // reason to abandon the whole ray.
+        //
+        // The picture in the orange is what settled it: the band came back
+        // olive, which is this orange mixed with GRASS. Rays leaving the near
+        // water pass over the shore bank, get vetoed against it, and stop
+        // there -- so everything standing BEHIND the bank was unreachable.
+        // The trees. The rocks. Anything tall, in every scene, always.
+        //
+        // Stepped over, exactly like the sky a few lines up, which was the
+        // same mistake in a different disguise.
+        // The exit map does NOT get to report this one while the ray is meant
+        // to carry on: returning here to paint it is exactly the abort the
+        // change removes, so the picture would show the old behaviour and
+        // call it the new one. Reported only when the ray really does stop.
+        if (thickContinue > 0.5) {
+          a = b;
+          pa = pb;
+          len *= rayGrow;
+          continue;
+        }
+        return (exitMap) ? debugExit(mix(vec3(1.0, 0.55, 0.0),
+                                         sceneColorAt(pb.xy), 0.5)) : miss;
+      }
       // binary-refine onto the contact
       vec3 lo = a;
       vec3 hi = b;
@@ -1512,6 +1549,7 @@ function Water.begin(ctx)
   send("rateLookup", ctx.rateMap or ctx.depth)
   send("useRateLookup", ctx.rateMap and 1 or 0)
   send("colorRate", (ctx.rateMap and Water.REFLECT_RATE) and 1 or 0)
+  send("thickContinue", Water.THICK_CONTINUE and 1 or 0)
   send("leanMarch", Water.LEAN_MARCH and 1 or 0)
   send("skyDepth", Water.SKY_DEPTH)
   send("farFloor", Water.RAY_FAR_FLOOR)
