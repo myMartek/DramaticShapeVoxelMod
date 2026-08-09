@@ -656,14 +656,22 @@ local function renderWorld(views, ctl)
   -- below the line of sight is the pad's arrangement, and for a menu it is the
   -- better one whether or not there is a hand to mount it on.
   local menu = uiShowing() and not (battle or fp)
+  -- Which kind of pose the device is being hung off, because Pokedex.place
+  -- corrects for each differently. A HELD pose is neither of the two it knew
+  -- about: it is built from the head and already pitched to face the reader,
+  -- so the ARKit hand anchor's SPIN and PITCH -- meant for a palm -- laid it
+  -- flat and turned the screen away. That is why it could not be read with a
+  -- pad in hand: the pad has no pose, so this is the pose it gets.
+  local handKind = ctl and ctl.poseKind or nil
   if (menu or not hand) and VRXR.hasQuadLayer == false then
     hand = heldPose(views[1].pose)
+    handKind = "held"
   end
   -- Cleared every frame and set again below only where it applies: a flag
   -- that survives the frame it was decided in is a flag that is wrong as soon
   -- as the player closes the menu.
   if hand and (battle or fp or menu) then
-    Pokedex.place(hand, pivot, anchor, scale, mountYaw, ctl and ctl.poseKind)
+    Pokedex.place(hand, pivot, anchor, scale, mountYaw, handKind)
     if uiShowing() then
       -- The engine's UI layer where there is no front buffer to read.
       --

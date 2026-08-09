@@ -564,6 +564,11 @@ local function padSticks()
       return (okd and v) and 1 or 0
     end
     return {
+      -- Which kind of device answered. Only an ordinary pad displaces hand
+      -- tracking (see VRCS.input); a Sense pair that is merely lying there
+      -- must not, or putting the controllers down would stop the hands
+      -- working too.
+      kind = "pad",
       moveX =  axis(pad, "leftx"),
       moveY = -axis(pad, "lefty"),
       lookX =  axis(pad, "rightx"),
@@ -583,7 +588,7 @@ local function padSticks()
   -- convention, so unlike SDL's there is nothing to negate here.
   local lx, ly, rx, ry = xrSticks()
   if lx == nil then return nil end
-  return { moveX = lx, moveY = ly, lookX = rx, lookY = ry }
+  return { kind = "sense", moveX = lx, moveY = ly, lookX = rx, lookY = ry }
 end
 
 function VRCS.input()
@@ -609,12 +614,31 @@ function VRCS.input()
     return ctl
   end
 
-  -- Then the bare hands: someone who has put the pad down and raised their
-  -- hands means the hands.
-  local hands = handInput()
-  if hands then return hands end
+  -- THEN THE PAD, AHEAD OF THE HANDS.
+  --
+  -- A player holding a DualSense still has hands, and the headset still
+  -- tracks them, so asking the hands first meant the pad was never read at
+  -- all. That was invisible for the LEFT stick -- the engine reads that one
+  -- itself through SDL and walks with it -- and total for the RIGHT one,
+  -- which only this mod reads: the turn and the diorama's zoom simply did
+  -- nothing while a hand was in view.
+  --
+  -- It also decides where the pokedex goes. With no pose in the ctl table
+  -- lib/VR.lua falls back to heldPose -- a fixed place below the line of
+  -- sight -- instead of mounting the device on a wrist that happens to be
+  -- holding a controller. That is the arrangement a pad wants: glance down,
+  -- not raise your hand.
+  --
+  -- Hands still win when there is no pad to prefer, which is the case this
+  -- ordering used to serve: someone who has put the controller down.
+  local pad = padSticks()
+  if pad and pad.kind == "pad" then
+    -- No poseKind: there is no pose at all on a pad, and lib/VR.lua reads the
+    -- absence as "hold the device for the player".
+    return pad
+  end
 
-  return padSticks()
+  return handInput() or pad
 end
 
 -- OpenXR only: a floating quad layer for the flat UI.  Callers check

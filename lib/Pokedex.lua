@@ -155,7 +155,14 @@ local function buildBody()
   -- d-pad and two chunky buttons -- the classic cover furniture, one box
   -- each on the front face (z = D..)
   box(verts, indices, 0, 0, 0, W, H, D, 1)                       -- body
-  box(verts, indices, W - 0.7, 0, 0, 0.7, H, D + 0.15, 2)        -- hinge
+  -- The hinge runs from the BACK of the slab to just proud of its front, so
+  -- it shares the body's right, top and bottom faces along its whole depth --
+  -- three coplanar pairs, all of them visible from outside, all of them
+  -- flickering as the head moves and the tie between them breaks one way or
+  -- the other. Nudged out of every one of them: a hair proud on the right,
+  -- a hair short at top and bottom, a hair forward of the back face. The
+  -- silhouette is unchanged at 0.01375 m to the voxel.
+  box(verts, indices, W - 0.7, 0.04, 0.04, 0.76, H - 0.08, D + 0.11, 2) -- hinge
   box(verts, indices, 0.6, H - 2.6, D, 2, 2, 0.5, 3)             -- lens
   box(verts, indices, 0.9, H - 1.3, D + 0.5, 0.6, 0.5, 0.12, 4)  -- glint
   box(verts, indices, 3.2, H - 1.6, D, 0.8, 0.8, 0.35, 5)        -- LEDs
@@ -231,7 +238,11 @@ function Pokedex.place(pose, pivot, anchor, scale, yaw, kind)
   m = Mat4.mul(m, Mat4.translate(Pokedex.OFFSET[1], Pokedex.OFFSET[2],
                                  Pokedex.OFFSET[3]))
   m = Mat4.mul(m, Mat4.rotateX(Pokedex.TILT))
-  if kind ~= "grip" then
+  -- Only a bare HAND wants these. A controller grip does not (see above), and
+  -- neither does the held pose lib/VR.lua builds from the head -- that one is
+  -- already turned to face the reader, and correcting it again for a palm is
+  -- what left the screen lying flat and pointing away.
+  if kind ~= "grip" and kind ~= "held" then
     if Pokedex.SPIN and Pokedex.SPIN ~= 0 then
       m = Mat4.mul(m, Mat4.rotateY(Pokedex.SPIN))
     end
