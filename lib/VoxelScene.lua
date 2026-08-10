@@ -27,6 +27,7 @@ local DayNight = V.require("DayNight")
 local FirstPerson = V.require("FirstPerson")
 local BattleBillboard = V.require("BattleBillboard")
 local Pokedex = V.require("Pokedex")
+
 local PaletteFX = require("src.render.PaletteFX")
 local Map = require("src.world.Map")
 
@@ -1132,6 +1133,7 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
     Voxel3D.seams(true)
     Voxel3D.glass(true)
   end
+
 
   -- The flat screen as a surface, where the backend has no composition layer
   -- to submit it on (lib/VRPanel.lua).

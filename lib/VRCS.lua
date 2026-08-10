@@ -392,27 +392,136 @@ local function handInput()
     -- fight the zoom, and there is nothing else it should mean.
     local tx = stick("turn", L, L.pinchMiddle)
     ctl.lookX, ctl.lookY = tx, 0
+    -- and the same pinch raw, for the table (see ctl.midR)
+    ctl.midL = L.pinchMiddle == true
+
+    -- THE THUMBS-UP WALKS, in both modes -- around the town and around the
+    -- table alike.
+    --
+    -- Same machinery as the two sticks above: the gesture's position is
+    -- latched the moment it is recognised, and the hand's displacement from
+    -- that point steers -- X sideways, Y forward and back, full deflection
+    -- HAND_STICK metres out and clamped there. Let the thumb down and the
+    -- origin is forgotten, so the next one starts from wherever the hand now
+    -- is rather than from where the last one did.
+    --
+    -- It cannot fight the pinch walk it joins: a thumbs-up needs the thumb
+    -- CLEAR of the index tip, and the pinch needs it touching. lib/VR.lua
+    -- prefers whichever is actually being made.
+    ctl.thumbHeld = L.thumbsUp == true
+    -- The direction itself, and the direction it started in. lib/VR.lua turns
+    -- the angle between them into the stick, because that decomposition needs
+    -- the head's heading and this file has no business locating a head.
+    ctl.thumbDir = L.thumbDir
+    if ctl.thumbHeld and L.thumbDir then
+      if not held.thumbDir then
+        held.thumbDir = { L.thumbDir[1], L.thumbDir[2], L.thumbDir[3] }
+      end
+    else
+      held.thumbDir = nil
+    end
+    ctl.thumbDir0 = held.thumbDir
+
     ctl.handl = L.pose
   else
-    held.walk, held.turn = nil, nil
+    held.walk, held.turn, held.thumbDir = nil, nil, nil
   end
 
   if R and R.tracked then
     ctl.a, ctl.aChanged = edge("a", R.pinchIndex == true)
     ctl.b, ctl.bChanged = edge("b", R.pinchMiddle == true)
+    -- The raw middle pinch as well as the button it makes: in the diorama
+    -- lib/VR.lua reads it as this hand's grip on the table instead. Held, not
+    -- edged -- a grab lasts as long as the fingers stay together, and B is the
+    -- edge of the very same pinch.
+    ctl.midR = R.pinchMiddle == true
+
+    -- THE RIGHT THUMB TURNS, as the left one walks.
+    --
+    -- Same gesture, same measurement -- the change in where the thumb points
+    -- since it was recognised -- and lib/VR.lua does the same decomposition on
+    -- it. One hand goes, the other looks: the arrangement every twin-stick
+    -- pad has, made out of thumbs that have no sticks under them.
+    ctl.turnHeld = R.thumbsUp == true
+    ctl.turnDir = R.thumbDir
+    if ctl.turnHeld and R.thumbDir then
+      if not held.turnDir then
+        held.turnDir = { R.thumbDir[1], R.thumbDir[2], R.thumbDir[3] }
+      end
+    else
+      held.turnDir = nil
+    end
+    ctl.turnDir0 = held.turnDir
+
+    -- START: thumb to RING finger, on this hand.
+    --
+    -- It was the fist, and the fist had to go: a thumbs-up folds the same
+    -- three fingers, so the moment the right hand became a stick every turn
+    -- of the view opened the pause menu. The ring pinch is the nearest thing
+    -- to a spare gesture a hand has -- index and middle are A and B, and it
+    -- cannot be confused with the thumbs-up, which needs the thumb clear of
+    -- every finger rather than touching one.
+    ctl.start, ctl.startChanged = edge("start", R.pinchRing == true)
+
     ctl.handr = R.pose
     ctl.aimr = R.pose
   else
     ctl.a, ctl.aChanged = edge("a", false)
     ctl.b, ctl.bChanged = edge("b", false)
+    ctl.start, ctl.startChanged = edge("start", false)
+    held.turnDir = nil
   end
 
-  -- A fist from either hand. Two hands can make one at once and that is still
-  -- one press, not two.
-  local fist = (L and L.tracked and L.fist) or (R and R.tracked and R.fist) or false
-  ctl.start, ctl.startChanged = edge("start", fist == true)
+  -- SELECT: thumb to RING finger, on the LEFT hand -- START's mirror image.
+  --
+  -- It was a clap, which read well and sat badly: a gesture needing both hands
+  -- cannot be made while either of them is doing something else, and on this
+  -- layout both of them usually are. The ring pinch costs one hand and is the
+  -- same shape as START, on the side that owns the movement.
+  --
+  -- An edge, not a level: SELECT is a press, and fingers held together would
+  -- otherwise repeat it for as long as they stayed there.
+  local selectNow = (L and L.tracked and L.pinchRing == true) or false
+  ctl.select, ctl.selectChanged = edge("select", selectNow)
 
   return ctl
+end
+
+-- A PAD IN YOUR HANDS BEATS A HAND IN VIEW -- a pad on the table does not.
+--
+-- Being connected used to be enough to displace the hands, which on this
+-- device means: pair a DualSense once and the hands never work again, however
+-- far away the pad is lying. The Sense pair was already exempted for exactly
+-- this reason ("a Sense pair that is merely lying there must not, or putting
+-- the controllers down would stop the hands working too"); an ordinary pad
+-- deserves the same reading of the same sentence.
+--
+-- Held past a deadzone rather than merely moved: a stick held at full
+-- deflection reports the same number every frame, and treating "unchanged" as
+-- idle would hand the walk over to the hands in the middle of walking. The
+-- deadzone is what keeps a drifting stick -- resting at a tenth off centre,
+-- common enough on a used DualSense -- from counting as somebody's hand.
+local PAD_IDLE_SECONDS = 2.0
+local PAD_AXIS_DEADZONE = 0.2
+local PAD_ANALOG_FLOOR = 0.3
+local padLastUsed = nil
+
+local function padInUse(pad)
+  local now = (love.timer and love.timer.getTime and love.timer.getTime()) or 0
+
+  local live = false
+  for _, key in ipairs({ "moveX", "moveY", "lookX", "lookY" }) do
+    if math.abs(pad[key] or 0) > PAD_AXIS_DEADZONE then live = true end
+  end
+  for _, key in ipairs({ "gripL", "gripR", "trigL", "trigR" }) do
+    if (pad[key] or 0) > PAD_ANALOG_FLOOR then live = true end
+  end
+
+  if live then padLastUsed = now end
+  if padLastUsed == nil then return false end
+  -- The grace period is what stops the pokedex jumping to a wrist every time
+  -- the player pauses between two steps.
+  return (now - padLastUsed) < PAD_IDLE_SECONDS
 end
 
 -- Also published on its own, because the flat screen wants the gestures
@@ -632,7 +741,7 @@ function VRCS.input()
   -- Hands still win when there is no pad to prefer, which is the case this
   -- ordering used to serve: someone who has put the controller down.
   local pad = padSticks()
-  if pad and pad.kind == "pad" then
+  if pad and pad.kind == "pad" and padInUse(pad) then
     -- No poseKind: there is no pose at all on a pad, and lib/VR.lua reads the
     -- absence as "hold the device for the player".
     return pad

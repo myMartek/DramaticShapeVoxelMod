@@ -81,6 +81,7 @@ local VRXR = VRBackend.get() or {}
 local VRGL = (VRBackend.kind() == "openxr") and V.require("VRGL") or nil
 local Pokedex = V.require("Pokedex")
 
+
 local VR = {}
 
 -- the row: plain OFF/ON. No hotkey -- the engine's display keys are
@@ -159,6 +160,7 @@ local padStartBinding = nil     -- the engine's own START binding, while parked
 -- pokedex all agree about which way the world now faces.
 local SNAP_TURN = math.rad(45)
 local fpYawOff = 0              -- accumulated snaps, radians
+local lastHeadYaw = 0           -- previous frame's heading (see renderWorld)
 local snapArmed = true          -- re-arms when the stick returns to centre
 
 local function wrapPi(a)
@@ -570,6 +572,19 @@ end
 
 
 local function renderWorld(views, ctl)
+  -- THE HEADING, kept for the next frame's controls.
+  --
+  -- driveControls runs BEFORE the views are located -- the frame that flips a
+  -- rung should render the flipped rung -- so a control that needs to know
+  -- which way the player is facing cannot ask this frame's head. It asks the
+  -- last one instead. For a walk direction a frame of lag is nothing: a head
+  -- does not turn measurably in sixteen milliseconds, and the alternative is
+  -- either a second locate or a control that steers by the room's compass
+  -- instead of by the player's.
+  if views and views[1] and views[1].pose then
+    lastHeadYaw = VRRig.headYawPitch(views[1].pose.quat)
+  end
+
   local ok, Game = pcall(require, "src.core.Game")
   local ow = ok and Game.overworld or nil
   if not (ow and ow.map and ow.camera and Voxel.active()
@@ -667,6 +682,30 @@ local function renderWorld(views, ctl)
     hand = heldPose(views[1].pose)
     handKind = "held"
   end
+  -- THE THUMBS-UP STEADIES THE DEVICE.
+  --
+  -- The dex hangs off the wrist, so every turn of the wrist turns the screen
+  -- with it -- and the thumbs-up is a gesture made WHILE the hand is being
+  -- moved, which is the worst possible moment for the thing being read to roll
+  -- along. So the gesture keeps the device WHERE the hand is and takes away
+  -- only its ORIENTATION: it borrows the held pose's instead -- the pad's
+  -- arrangement, already turned to face the reader -- so the screen stays
+  -- level and legible while the hand steers.
+  --
+  -- Position from the hand rather than the held place as well, deliberately:
+  -- snapping it across to a fixed spot the instant a thumb goes up, and back
+  -- when it drops, is a jump in the corner of the eye every time the gesture
+  -- starts. Keeping the anchor makes it a turn instead of a leap.
+  --
+  -- handKind goes to "held" with it, because that is what the quat now is:
+  -- Pokedex.place's SPIN and PITCH corrections exist for a palm, and applying
+  -- them to a pose that already faces the reader is what laid the screen flat
+  -- and pointed it away on the pad.
+  if hand and handKind ~= "held" and ctl and ctl.thumbHeld then
+    hand = { pos = hand.pos, quat = heldPose(views[1].pose).quat }
+    handKind = "held"
+  end
+
   -- Cleared every frame and set again below only where it applies: a flag
   -- that survives the frame it was decided in is a flag that is wrong as soon
   -- as the player closes the menu.
@@ -1094,6 +1133,136 @@ local function setGB(inp, btn, down)
   end
 end
 
+-- THE THUMB AS A JOYSTICK: how far it has been TIPPED out of the direction it
+-- was pointing when the gesture began.
+--
+-- Not how far the hand has been carried, which is what this was and what only
+-- worked in one direction. A hand that travels leaves the place the cameras
+-- see it best -- it turns away, the skeleton softens, the gesture dies mid
+-- movement. A hand that stays put and tips does not: it is a wrist's worth of
+-- motion in the one spot the tracker is happiest with, and it is what a thumb
+-- on a stick actually does.
+--
+-- Measured against the PLAYER, not the room. The two directions are decomposed
+-- along the head's own right and forward (last frame's -- see renderWorld), so
+-- tipping the thumb towards your right hand walks right whichever way you have
+-- turned since. In world axes "forward" would mean whatever the room decided,
+-- and would change meaning every time the player turned round.
+--
+-- FULL_TIP is the sine of the tip that means full speed. 0.35 is about twenty
+-- degrees: far enough that holding still is unambiguous, near enough that full
+-- speed does not need the wrist bent to its stop.
+local FULL_TIP = 0.35
+
+-- A REAL DEADZONE, as a fraction of full deflection. There was none before --
+-- only the clamp at the far end -- and a thumb has no spring to return to: it
+-- comes back to about where it started, not exactly, and the tracker's own
+-- estimate wanders a degree or two on top. Both of those are steering input
+-- when the resting point is zero.
+--
+-- The remainder is rescaled rather than merely offset, so leaving the zone
+-- starts at a standstill instead of jumping straight to a quarter speed.
+local DEAD_ZONE = 0.30
+
+-- Both thumbs run through here: the left one walks, the right one turns. One
+-- function rather than two, because they are the same instrument on different
+-- hands, and a copy would drift the moment either was tuned.
+local function thumbStick(held, d, d0)
+  if not (held and d and d0) then return nil end
+  -- The head's heading as a pair of horizontal axes. heldPose derives forward
+  -- from a yaw the same way; right is that turned a quarter about up.
+  local a = lastHeadYaw or 0
+  local fx, fz = -math.sin(a), -math.cos(a)
+  local rx, rz = -fz, fx
+  -- NEGATED, both axes, measured in the headset rather than reasoned out: a
+  -- thumb tipped to the right has its TIP going right, but the hand it is
+  -- attached to rolls the other way about the wrist, and the walk follows the
+  -- hand. Tipping the thumb left is what a person does to go left.
+  local dx = -((d[1] - d0[1]) * rx + (d[3] - d0[3]) * rz)
+  local dz = -((d[1] - d0[1]) * fx + (d[3] - d0[3]) * fz)
+
+  local x, y = dx / FULL_TIP, dz / FULL_TIP
+  -- Round, not square: a deadzone applied per axis lets a diagonal through at
+  -- a smaller tip than a straight push needs, which reads as the stick
+  -- preferring the corners.
+  local mag = math.sqrt(x * x + y * y)
+  if mag <= DEAD_ZONE then return 0, 0 end
+  local out = math.min(1, (mag - DEAD_ZONE) / (1 - DEAD_ZONE)) / mag
+  -- +Y forward, as the ctl table wants it.
+  return x * out, y * out
+end
+
+-- THE RIGHT THUMB'S STEP TURN: one notch per crossing, sideways only.
+--
+-- TURN_STEP_ON is how far the thumb must tip out of the direction it started
+-- in before the view moves; TURN_STEP_OFF is how near the start it must come
+-- back before it can move again. Two thresholds rather than one, because a
+-- thumb held just past a single line would trigger over and over on the
+-- tracker's own millimetre of wander -- and because "hold it further" must
+-- mean nothing at all, which is only true if crossing is what counts.
+local TURN_STEP_ON = math.rad(30)
+local TURN_STEP_OFF = math.rad(15)
+
+-- One armed flag per thumb. They step independently -- the right one turning
+-- the view, the left one walking a menu cursor -- and a shared flag would let
+-- either hand disarm the other.
+local turnStep = { armed = true }
+local menuStep = { armed = true }
+
+-- How far the thumb LEANS out of where it started, as two angles: along the
+-- player's own right, and along their forward.
+--
+-- A lean, not a heading. A thumbs-up points nearly straight up, and the
+-- compass bearing of a vector that points up is noise -- it swings across the
+-- whole circle for a millimetre of wobble. What actually changes when the
+-- wrist turns is how far the thumb tips out of vertical, and that is a stable
+-- quantity at any hand rotation.
+--
+-- Negated for the same reason the walk is: the thumb's TIP goes one way while
+-- the hand it belongs to rolls the other, and it is the hand people steer
+-- with.
+local function thumbLean(d, d0)
+  local a = lastHeadYaw or 0
+  local fx, fz = -math.sin(a), -math.cos(a)
+  local rx, rz = math.cos(a), -math.sin(a)
+  local function lean(v, ax, az)
+    return math.asin(math.max(-1, math.min(1, v[1] * ax + v[3] * az)))
+  end
+  return -(lean(d, rx, rz) - lean(d0, rx, rz)),
+         -(lean(d, fx, fz) - lean(d0, fx, fz))
+end
+
+-- ONE NOTCH PER CROSSING: -1, 0 or 1 on each axis.
+--
+-- Two thresholds rather than one, because a thumb held just past a single line
+-- would fire over and over on the tracker's own wander -- and because "hold it
+-- further" has to mean nothing at all, which is only true if the crossing is
+-- what counts rather than the amount.
+--
+-- One axis at a time, the larger lean winning: a cursor that goes diagonally
+-- because a wrist was a few degrees off straight is a cursor that lands
+-- somewhere nobody aimed at.
+local function thumbStep(state, held, d, d0, withForward)
+  if not (held and d and d0) then
+    -- Thumb down: the next gesture starts armed, from wherever the thumb then
+    -- is. The origin is forgotten with it.
+    state.armed = true
+    return 0, 0
+  end
+  local sx, sy = thumbLean(d, d0)
+  if not withForward then sy = 0 end
+  local ax, ay = math.abs(sx), math.abs(sy)
+  local most = math.max(ax, ay)
+  if state.armed and most >= TURN_STEP_ON then
+    state.armed = false
+    if ax >= ay then return (sx > 0 and 1 or -1), 0 end
+    return 0, (sy > 0 and 1 or -1)
+  elseif most <= TURN_STEP_OFF then
+    state.armed = true
+  end
+  return 0, 0
+end
+
 local function driveControls(ctl, dt, fp)
   if not ctl then
     releaseInputs()
@@ -1102,6 +1271,28 @@ local function driveControls(ctl, dt, fp)
   local ok, Game = pcall(require, "src.core.Game")
   if not (ok and Game.input) then return end
   local inp = Game.input
+
+  -- THE RIGHT THUMB TURNS THE VIEW IN STEPS, applied here rather than written
+  -- onto ctl.lookX.
+  --
+  -- It is not a stick and must not be read as one. A stick asks how FAR it is
+  -- pushed and keeps acting for as long as it is held; this asks only whether
+  -- a line has been crossed, acts once, and then waits to be re-armed by a
+  -- thumb coming home. Passing a one-frame spike down the stick path would
+  -- have worked by accident under the snap setting and produced a barely
+  -- visible nudge under the smooth one, because a rate integrated over one
+  -- frame is nothing.
+  local step = thumbStep(turnStep, ctl.turnHeld, ctl.turnDir, ctl.turnDir0,
+                         false)
+  if step ~= 0 then
+    -- Increasing yaw turns LEFT in this mod's compass, so a step to the right
+    -- subtracts -- the same sign the stick-driven snap below uses.
+    if fp and camMode ~= "battle" then
+      fpYawOff = wrapPi(fpYawOff - step * SNAP_TURN)
+    else
+      dioYaw = wrapPi(dioYaw - step * SNAP_TURN)
+    end
+  end
 
   -- THE GRAB, decided before anything reads a stick.
   --
@@ -1135,6 +1326,24 @@ local function driveControls(ctl, dt, fp)
 
   local gl, gr = ctl.gripL or 0, ctl.gripR or 0
   local diorama = not fp and camMode ~= "battle"
+
+  -- THE MIDDLE-FINGER PINCH IS THE HAND'S GRIP, and only on the table.
+  --
+  -- Thumb and middle finger, either hand: that hand takes hold and drags the
+  -- town, its height with it. Both at once and the pair of them turn and scale
+  -- it, the same two-handed gesture the controllers make -- the code below
+  -- does not care which kind of hand filled the grips.
+  --
+  -- Routed here rather than in lib/VRCS.lua because it is TRUE ONLY HERE: the
+  -- right middle pinch is B everywhere else, and the left one is the turn. In
+  -- the diorama neither of those is wanted -- the turn is first-person only --
+  -- so the gesture is free exactly where the table is, and nowhere else. The
+  -- controls file cannot know that; this one already does.
+  if diorama and (ctl.midL ~= nil or ctl.midR ~= nil) then
+    gl = ctl.midL and 1 or 0
+    gr = ctl.midR and 1 or 0
+  end
+
   local grabbing = diorama and math.max(gl, gr) > 0.6
 
   -- TWO HANDS TURN AND SCALE, one hand moves.
@@ -1177,7 +1386,10 @@ local function driveControls(ctl, dt, fp)
     setGB(inp, "start", false)
   else
     setGB(inp, "a", ctl.a)
-    setGB(inp, "b", ctl.b)
+    -- B stands down while that same pinch is holding the table: the right
+    -- middle finger is both, and a drag that cancels the menu it opens is
+    -- worse than a B that waits until the hand lets go.
+    setGB(inp, "b", ctl.b and not (diorama and ctl.midR == true))
     setGB(inp, "start", ctl.start)
   end
   -- SELECT, which no other path on this hardware delivers. Outside horde mode
@@ -1189,8 +1401,52 @@ local function driveControls(ctl, dt, fp)
   -- to the grid d-pad for the diorama, and FirstPerson.moveVector reads
   -- the same raw pair for the free walk. OpenXR's +Y is up; the engine's
   -- lefty is +down.
-  inp:gamepadaxis(nil, "leftx", padGrab and 0 or (ctl.moveX or 0))
-  inp:gamepadaxis(nil, "lefty", padGrab and 0 or -(ctl.moveY or 0))
+  --
+  -- WHO IS WALKING: the thumbs-up while it is being made, the index pinch
+  -- otherwise. Both modes, and the same pair of axes either way -- a walk is a
+  -- walk whether the town is on a table or around you.
+  --
+  -- A preference rather than a sum: the two gestures are mutually exclusive at
+  -- the hand (a thumbs-up holds the thumb clear of the index tip, a pinch has
+  -- them touching), but the pinch stick keeps reporting its last deflection
+  -- for the frame the fingers part, and adding that in would jerk the walk at
+  -- the very moment the player changes gesture.
+  local mvx, mvy = ctl.moveX or 0, ctl.moveY or 0
+  local tx, ty = thumbStick(ctl.thumbHeld, ctl.thumbDir, ctl.thumbDir0)
+  if tx then mvx, mvy = tx, ty end
+
+  -- A MENU IS NOT A WALK, so in one the left thumb steps rather than steers.
+  --
+  -- The test is whether the pokedex has anything ON it -- the pause menu, a
+  -- dialog, a fight -- which is the same question as "is the player reading
+  -- something rather than walking about", and it is already answered here for
+  -- the device's own screen. Tying the two means the hand changes behaviour
+  -- exactly when the thing in it lights up, which is a rule a player can see
+  -- rather than one they have to be told.
+  --
+  -- A cursor wants notches: a stick tipped for half a second walks a menu past
+  -- whatever was being aimed at, and holding it still enough to land on one row
+  -- is a demand no wrist should have to meet. Same crossing-and-re-arm as the
+  -- right thumb's turn, with the forward axis live -- a menu has an up.
+  local menuMode = uiShowing()
+  local sx, sy = 0, 0
+  if menuMode then
+    sx, sy = thumbStep(menuStep, ctl.thumbHeld, ctl.thumbDir, ctl.thumbDir0,
+                       true)
+    -- and the walk stands down, or the same gesture would scroll the menu
+    -- twice: once as notches, once through the engine's own stick handler
+    if ctl.thumbHeld then mvx, mvy = 0, 0 end
+  else
+    menuStep.armed = true
+  end
+  -- Released the frame after they are pressed, which is what makes them taps:
+  -- setGB only acts on a change, so a step is one press and one release.
+  setGB(inp, "left",  sx < 0)
+  setGB(inp, "right", sx > 0)
+  setGB(inp, "up",    sy > 0)
+  setGB(inp, "down",  sy < 0)
+  inp:gamepadaxis(nil, "leftx", padGrab and 0 or mvx)
+  inp:gamepadaxis(nil, "lefty", padGrab and 0 or -mvy)
 
   -- the left stick click: the VOXEL ladder ordinarily, and the way out of
   -- horde mode while it runs (the rung is locked there, so the click has
