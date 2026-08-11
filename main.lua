@@ -488,8 +488,10 @@ local SETTINGS = {
   -- device that is not plugged in decides nothing, and this one is read
   -- exclusively by the headset's right stick.
   { VR.smoothTurn,
-    "Turn smoothly with the right stick instead of snapping 45 degrees a "
-    .. "flick. OFF by default, and deliberately: a software turn moves the "
+    "Turn smoothly instead of snapping 45 degrees a flick -- with the right "
+    .. "stick on a controller, and with the right thumb on bare hands, where "
+    .. "how far the thumb is tipped is how fast the view comes round. "
+    .. "OFF by default, and deliberately: a software turn moves the "
     .. "world past a head that did not move, which is the most reliable way "
     .. "to make somebody ill in a headset. Turn it on if you have your sea "
     .. "legs and want the continuity.",

@@ -1282,15 +1282,41 @@ local function driveControls(ctl, dt, fp)
   -- have worked by accident under the snap setting and produced a barely
   -- visible nudge under the smooth one, because a rate integrated over one
   -- frame is nothing.
-  local step = thumbStep(turnStep, ctl.turnHeld, ctl.turnDir, ctl.turnDir0,
-                         false)
-  if step ~= 0 then
-    -- Increasing yaw turns LEFT in this mod's compass, so a step to the right
-    -- subtracts -- the same sign the stick-driven snap below uses.
-    if fp and camMode ~= "battle" then
-      fpYawOff = wrapPi(fpYawOff - step * SNAP_TURN)
-    else
-      dioYaw = wrapPi(dioYaw - step * SNAP_TURN)
+  -- FREELY OR IN STEPS, whichever the SMOOTH TURN row says.
+  --
+  -- The step turn took that decision away from the player: it applies a fixed
+  -- 45 degrees itself and never touches ctl.lookX, so the row -- which exists
+  -- precisely so somebody with their sea legs can turn continuously -- decided
+  -- nothing at all for the hands. It still worked for a controller, which made
+  -- it worse rather than better: the same setting, two answers.
+  --
+  -- ON, the thumb is a stick again and the smooth turn below integrates it as
+  -- a rate. OFF, it is the notch it has been all evening.
+  if VR.smoothTurn:get() == true then
+    local lx, ly = thumbStick(ctl.turnHeld, ctl.turnDir, ctl.turnDir0)
+    if lx then
+      ctl.lookX, ctl.lookY = lx, ly
+      -- The table turns here, because it cannot turn below: lookX reaches
+      -- dioYaw only through a pad's held grip, and a hand has no grip. Same
+      -- rate the pad turns it at, so the two feel alike.
+      if not (fp and camMode ~= "battle") and math.abs(lx) > 0.15 then
+        dioYaw = wrapPi(dioYaw - lx * (dt or 0) * GRAB_TURN_RATE)
+      end
+    end
+    -- Disarmed while this is on, so switching the row back mid-gesture does
+    -- not fire a notch from a thumb that is already tipped over.
+    turnStep.armed = false
+  else
+    local step = thumbStep(turnStep, ctl.turnHeld, ctl.turnDir, ctl.turnDir0,
+                           false)
+    if step ~= 0 then
+      -- Increasing yaw turns LEFT in this mod's compass, so a step to the
+      -- right subtracts -- the same sign the stick-driven snap below uses.
+      if fp and camMode ~= "battle" then
+        fpYawOff = wrapPi(fpYawOff - step * SNAP_TURN)
+      else
+        dioYaw = wrapPi(dioYaw - step * SNAP_TURN)
+      end
     end
   end
 
