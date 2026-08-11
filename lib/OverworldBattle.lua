@@ -57,6 +57,48 @@ local OverworldBattle = {}
 local DEBUG = select(2, pcall(function() return os.getenv("DS_BATTLE_DEBUG") end))
 if DEBUG == nil or DEBUG == false then DEBUG = nil end
 
+-- ---- what the first fight leaves behind ---------------------------------
+--
+-- An env var is a shot run's diagnostic; it says nothing from a headset. The
+-- one failure this file cannot see from the outside -- the pics canvases
+-- refused because the frame that first asked for them was inside the eye
+-- pass -- shows up as two empty marks on the ground and a fight that will
+-- not move on, with nothing in it to read. So the build is written down,
+-- into the save directory, where it survives the session that produced it.
+--
+-- Bounded, because a line a frame would be a log nobody can read: keyed
+-- notes are written once per fight, and the whole file stops at DIAG_MAX.
+local DIAG_FILE = "battle-diag.txt"
+local DIAG_MAX = 300
+local diagCount, diagSeen, diagText = 0, {}, ""
+
+local function diag(key, fmt, ...)
+  if key then
+    if diagSeen[key] then return end
+    diagSeen[key] = true
+  end
+  local ok, msg = pcall(string.format, fmt, ...)
+  if not ok then msg = fmt end
+  if DEBUG then print("[DS-BTL] " .. msg) end
+  if diagCount >= DIAG_MAX then return end
+  diagCount = diagCount + 1
+  local t = 0
+  pcall(function() t = love.timer.getTime() end)
+  local line = string.format("[%8.2f] %s\n", t, msg)
+  diagText = diagText .. line
+  -- append where there is one, and otherwise rewrite the whole thing: the
+  -- file is capped at DIAG_MAX lines, so the rewrite stays small, and a log
+  -- that is not written is not a log.
+  local wrote = pcall(function() love.filesystem.append(DIAG_FILE, line) end)
+  if not wrote then
+    pcall(function() love.filesystem.write(DIAG_FILE, diagText) end)
+  end
+end
+
+-- A new fight gets to report its own troubles, even if the last one already
+-- reported the same ones.
+local function diagFresh() diagSeen = {} end
+
 OverworldBattle.KEY = "battles"
 OverworldBattle.LABEL = "3D-BTL"
 
@@ -418,6 +460,9 @@ function OverworldBattle.begin(state, battle)
               armed = false, token = 0 }
   cullCast(state)
   BattleCam.reset()
+  diagFresh()
+  diag(nil, "battle staged")
+  OverworldBattle.warmTextures()
   return true
 end
 
@@ -905,10 +950,26 @@ local function texCanvasFor(side)
   if c then return c end
   local ok, made = pcall(love.graphics.newCanvas, BattleScene.GB_W,
                          BattleScene.GB_H, { dpiscale = 1 })
-  if not ok then return nil end
+  if not ok then
+    -- Not cached as a failure: the next frame may be a frame that can build
+    -- it. What is not survivable is doing this silently forever.
+    diag("canvas-" .. side, "canvas %s refused: %s", side, tostring(made))
+    return nil
+  end
   made:setFilter("nearest", "nearest")
   texCanvas[side] = made
+  diag(nil, "canvas %s built (%dx%d)", side, BattleScene.GB_W, BattleScene.GB_H)
   return made
+end
+
+-- Build both pics canvases up front, from the update half of the loop, so no
+-- fight has to build one while a pass is open. Everything downstream still
+-- copes with a canvas that is not there -- this only takes away the reason
+-- for it to happen on the first fight of a session.
+function OverworldBattle.warmTextures()
+  local e = texCanvasFor("enemy")
+  local p = texCanvasFor("player")
+  return (e and p) and true or false
 end
 
 -- Whether this side has anything to draw at all. Mirrors drawPicsLayer's own
@@ -1023,9 +1084,22 @@ function OverworldBattle.textures(battle)
   if not OverworldBattle.backPinned() then
     okP, player = pcall(OverworldBattle.sideTexture, battle, "player")
   end
+  if not okE then diag("raise-enemy", "enemy raised: %s", tostring(enemy)) end
+  if not okP then diag("raise-player", "player raised: %s", tostring(player)) end
   out.enemy = okE and enemy or nil
   out.player = okP and player or nil
-  if not (out.enemy or out.player) then return nil end
+  if not (out.enemy or out.player) then
+    -- Nobody on the marks is the ordinary state of an intro, so the two are
+    -- told apart by what the canvases are doing: with both built this is a
+    -- fight that has not sent anything out yet, without them it is the fight
+    -- that never will.
+    if texCanvas.enemy and texCanvas.player then
+      diag("empty-ready", "no billboards yet, canvases ready")
+    else
+      diag("empty-nocanvas", "no billboards AND no canvases -- stuck fight")
+    end
+    return nil
+  end
   out.flash = OverworldBattle.flashing(battle)
   return out
 end

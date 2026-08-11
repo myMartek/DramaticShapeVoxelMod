@@ -911,6 +911,12 @@ mod.events:on("map.reloaded", function(payload)
   if payload and payload.reason == "colors" then return end
   local mapId = payload and (payload.mapId or (payload.map and payload.map.id))
   if mapId then ChunkMesher.invalidate(mapId) end
+  -- A map is standing well before anything on it can start a fight, and this
+  -- runs nowhere near a pass, so it is the earliest honest moment to have
+  -- the battle pics canvases built. Costs two small canvases once; saves the
+  -- first fight of the session from building them mid-frame, which on the
+  -- headset is where they are refused and both mons quietly fail to appear.
+  pcall(OverworldBattle.warmTextures)
 end)
 
 -- ------- rows come and go, so the menu has to notice
