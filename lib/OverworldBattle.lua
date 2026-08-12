@@ -1174,6 +1174,16 @@ function OverworldBattle.install()
     OverworldState.dramaticShapeBattleHook = true
   end
 
+  -- the STADIUM rung's own wraps, which drive the models' animations off the
+  -- fight (see Stadium.install): performMove is the one place a move is
+  -- actually used, and its move id is the key the species' own animation
+  -- comes out of the pack under. Without this the models stand in their idle
+  -- through the whole fight and the only thing that moves is the Game Boy's
+  -- own effect layer -- which is exactly what a swing with no swing looks
+  -- like. Idempotent, and installed whichever rung the row is on: the wraps
+  -- do nothing at all while no stadium session is live.
+  pcall(function() V.require("Stadium").install() end)
+
   -- WHICH SIDE IS SWINGING, which the engine knows and does not keep.
   --
   -- AnimPlayer:start is handed attackerIsPlayer and uses it to build the
