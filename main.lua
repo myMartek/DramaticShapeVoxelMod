@@ -218,6 +218,13 @@ mod.content.render_pipelines:register("voxel", {
     -- and the whole battle. Ahead of the active() gate below, because a 3D
     -- battle does not require the free-roam mode to be switched on.
     OverworldBattle.update(dt)
+    -- The one-time build of the Pokemon Stadium battle models out of the
+    -- player's own cartridge, if there is one to build from and it has not
+    -- been done (see StadiumInstall). Rides this hook for the reason the
+    -- battle does -- it is the tick that runs whatever is on the stack -- and
+    -- asks exactly once, on the first frame the player is actually in the
+    -- world, so it never fights the launcher for the screen.
+    pcall(function() V.require("StadiumScreen").maybePush() end)
     -- The horde, on the same always-running tick and for the same reason:
     -- it owns no pass of the frame, it is a MODE over the overworld, and
     -- it has to keep thinking while a warp's wipe covers the screen (the
