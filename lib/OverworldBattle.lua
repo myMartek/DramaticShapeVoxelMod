@@ -106,9 +106,29 @@ OverworldBattle.LABEL = "3D-BTL"
 -- the player to go and find the switch before the world shows up in a
 -- battle. ON is first, so it is also what an unreadable stored value falls
 -- back to.
+--
+-- STADIUM is the same staged fight with the Pokemon Stadium battle models in
+-- place of the Game Boy's pics -- skinned, animated, standing on the same
+-- ground in the same weather (see lib/Stadium.lua). It sits in the MIDDLE
+-- rather than at the end because the ladder stores VALUES, not places: `true`
+-- stays first as the default and the fallback, `false` still reads back as
+-- OFF, and a save written before this rung existed opens on the rung it was
+-- written for.
+--
+-- It is GATED on the models existing. The mod ships no Stadium data and
+-- cannot: it is that game's. Until the player has supplied their own
+-- cartridge and it has been built from (StadiumInstall), the row simply has
+-- one stop fewer -- skipped rather than offered and then refused, because a
+-- setting that can be selected and does nothing reads as a broken mod.
 OverworldBattle.setting = ModSetting.new(OverworldBattle.KEY,
                                          OverworldBattle.LABEL,
-                                         { true, false }, { "ON", "OFF" })
+                                         { true, "stadium", false },
+                                         { "ON", "STADIUM", "OFF" })
+  :setGate(function(value)
+    if value ~= "stadium" then return true end
+    local ok, install = pcall(V.require, "StadiumInstall")
+    return ok and install and install.available()
+  end)
 
 -- Whether the VR row is ON -- read lazily, because VR requires modules
 -- that sit above this one. While it is, this mode stops being optional:
@@ -463,6 +483,9 @@ function OverworldBattle.begin(state, battle)
   diagFresh()
   diag(nil, "battle staged")
   OverworldBattle.warmTextures()
+  -- and, on the STADIUM rung, the pair of models that will stand on this
+  -- arena's two cells. Declines quietly on any other rung.
+  pcall(function() V.require("Stadium").begin(arena) end)
   return true
 end
 
@@ -493,6 +516,7 @@ function OverworldBattle.finish()
   restoreCast()
   session = nil
   Voxel3D.camera = nil
+  pcall(function() V.require("Stadium").finish() end)
 end
 
 -- ------- per-frame
@@ -530,6 +554,17 @@ function OverworldBattle.update(dt)
   -- the world pass is hidden behind the battle, so mesh builds get the wide
   -- slice: nothing visible can hitch on them
   ChunkMesher.pump(true)
+
+  -- The STADIUM models go FIRST, because what they decide is WHICH pics are
+  -- needed: a side with a model standing on it gets no billboard texture
+  -- rendered at all (see Stadium.covers). Posed and skinned once for the
+  -- frame -- the sun pass, the camera and, in a headset, both eyes all draw
+  -- the same skinned meshes.
+  pcall(function()
+    local host = (session.arena and session.arena.map) or session.state.map
+    V.require("Stadium").update(dt, session.battle,
+                                BattleScene.groundY(host, session.arena))
+  end)
 
   -- The mons' textures are rendered HERE, with no canvas bound, for the same
   -- reason the scene is: the pics layer binds its own targets, and doing that
@@ -998,6 +1033,14 @@ local OFF = {
 -- feet ended up, in canvas coordinates.
 function OverworldBattle.sideTexture(battle, side)
   if not (innerPics and battle) then return nil end
+  -- On the STADIUM rung a side standing a MODEL needs no pic: rendering one
+  -- anyway would hang a second, flat copy of the same Pokemon on the same
+  -- cell. Asked per side, so a species with no pack -- or a substitute doll,
+  -- or the trainer before the send-out -- still comes through here.
+  local okS, covered = pcall(function()
+    return V.require("Stadium").covers(battle, side)
+  end)
+  if okS and covered then return nil end
   if not sideVisible(battle, side) then return nil end
   local canvas = texCanvasFor(side)
   if not canvas then return nil end
@@ -1088,7 +1131,16 @@ function OverworldBattle.textures(battle)
   if not okP then diag("raise-player", "player raised: %s", tostring(player)) end
   out.enemy = okE and enemy or nil
   out.player = okP and player or nil
-  if not (out.enemy or out.player) then
+  -- On the STADIUM rung both sides can legitimately have no pic -- the pair
+  -- of them are models -- and this table must still come back, because it
+  -- carries the HIT FLASH, and because the VR eye pass reads its presence as
+  -- "there is a staged fight to draw at all". Without this the models would
+  -- be posed every frame and never reach an eye.
+  local okStanding, standing = pcall(function()
+    return V.require("Stadium").standing()
+  end)
+  standing = (okStanding and standing) and true or false
+  if not (out.enemy or out.player or standing) then
     -- Nobody on the marks is the ordinary state of an intro, so the two are
     -- told apart by what the canvases are doing: with both built this is a
     -- fight that has not sent anything out yet, without them it is the fight

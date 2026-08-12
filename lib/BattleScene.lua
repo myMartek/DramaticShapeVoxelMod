@@ -374,6 +374,13 @@ local function castShadows(state, arena, terrain, nbMesh, cx, cy, vw, vh,
   end
   ShadowMap.sprites(false)
 
+  -- the STADIUM models, outside the sprite marking: that flag exists for
+  -- flat cut-outs that must not lie across water, and these are real
+  -- geometry standing in the world -- a Gyarados at the water's edge should
+  -- put a Gyarados on the water. Un-snugged for the same reason: snug is a
+  -- bias for a card rooted to the ground plane, and a model has thickness.
+  pcall(function() V.require("Stadium").cast(ShadowMap) end)
+
   ShadowMap.finish(sig)
 end
 
@@ -595,6 +602,17 @@ function BattleScene.render(state, arena, textures, token)
     end
     Voxel3D.glass(true)
     Voxel3D.seams(true)
+    -- and the STADIUM models, inside the same flash window and with the same
+    -- camera-ward pull, so a Pokemon standing on its tile still wins the
+    -- depth test against that tile. They manage the wireframe and the glass
+    -- mask around their own draws (StadiumRig), which is why this sits
+    -- outside the pair above rather than between them.
+    local okStadium, stadiumErr = pcall(function()
+      V.require("Stadium").draw(BattleBillboard.PULL)
+    end)
+    if not okStadium then
+      pcall(function() V.require("Stadium").report(stadiumErr) end)
+    end
     if flashing then Voxel3D.flatten(nil) end
     -- grass and flowers ride the same camera-ward pull the free-roam pass
     -- gives them, measured against THIS camera's pitch rather than the

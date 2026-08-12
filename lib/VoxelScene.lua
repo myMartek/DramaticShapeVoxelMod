@@ -861,6 +861,10 @@ local function castShadows(state, terrain, nbMesh, posed, cx, cy, vw, vh,
     ShadowMap.draw(BattleBillboard.mesh(), card.tex, ShadowMap.snug(card.model))
   end
   ShadowMap.sprites(false)
+  -- and the STADIUM models, outside the sprite flag and un-snugged, for the
+  -- reasons the flat battle pass gives (BattleScene.castShadows): these are
+  -- geometry, not cut-outs.
+  pcall(function() V.require("Stadium").cast(ShadowMap) end)
 
   ShadowMap.finish(sig)
 end
@@ -1068,6 +1072,10 @@ function VoxelScene.render(state, w, h, vw, vh, paletteFor, eyes)
         Voxel3D.draw(BattleBillboard.mesh(), card.tex, card.model,
                      BattleBillboard.PULL)
       end
+      -- and the STADIUM models on the same arena, inside the same flash
+      -- window and with the mons' own camera-ward pull. On that rung `cards`
+      -- is usually empty and this is the whole fight.
+      pcall(function() V.require("Stadium").draw(BattleBillboard.PULL) end)
       if battleTex.flash then Voxel3D.flatten(nil) end
       -- and the MOVE ANIMATIONS, standing on the same arena: the
       -- engine's own effects layer on the plane through both cells
