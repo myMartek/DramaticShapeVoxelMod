@@ -486,31 +486,54 @@ end
 -- side with the Game Boy's four-colour art, which is as saturated as art
 -- gets, the result looks washed out.
 --
--- So the texture is pulled back toward its own colour, away from its grey:
--- luminance is left exactly where it is and only the distance from it grows,
--- which brightens nothing and blows no channel out on its own. 1.0 would be
--- the raw cartridge.
+-- Measured, not guessed. Charmeleon's body textures come off the cartridge
+-- averaging around (182, 76, 105) and (222, 112, 122) -- BLUE ahead of green,
+-- so a light crimson, and only the flame beside it is actually orange. The
+-- N64 turns that into the red everyone remembers with a real light: these
+-- models carry NORMAL and no COLOR_0, so the game shades them and the texture
+-- alone was never meant to be the finished picture.
 --
--- Done on LOAD rather than baked into the packs, deliberately. It is a look,
--- looks get adjusted, and a number that can be moved without asking anyone to
--- extract 151 models again is a number that can actually be tuned.
-StadiumPack.SATURATION = 1.35
+-- Which is why saturation alone made it WORSE. Pushing a colour away from its
+-- grey moves red and blue apart, and blue was already the one in front: what
+-- came out was more pink, not more red. The texture is not short of colour,
+-- it is short of DEPTH.
+--
+-- So the grade is two numbers, in this order:
+--
+--   GAMMA       every channel raised to this power. Values above 1 darken the
+--               midtones and leave black and white alone, which is what turns
+--               a light crimson into a deep red rather than a dim pink.
+--   SATURATION  a gentle pull away from grey afterwards, around the NEW
+--               luminance, so the depth gamma just found is not undone.
+--
+-- 1.0 and 1.0 are the raw cartridge. Done on LOAD rather than baked into the
+-- packs, deliberately: it is a look, looks get adjusted, and a number that can
+-- be moved without extracting 151 models again is a number that can actually
+-- be tuned.
+StadiumPack.GAMMA = 1.45
+StadiumPack.SATURATION = 1.15
 
 -- Rec. 601 luma, which is what the N64's own colour space is closest to.
 local LUM_R, LUM_G, LUM_B = 0.299, 0.587, 0.114
 
-local function saturate(data)
-  local s = StadiumPack.SATURATION
-  if not s or s == 1 then return end
+local function grade(data)
+  local s = StadiumPack.SATURATION or 1
+  local gm = StadiumPack.GAMMA or 1
+  if s == 1 and gm == 1 then return end
   data:mapPixel(function(_, _, r, g, b, a)
-    local lum = LUM_R * r + LUM_G * g + LUM_B * b
-    local nr = lum + (r - lum) * s
-    local ng = lum + (g - lum) * s
-    local nb = lum + (b - lum) * s
-    if nr < 0 then nr = 0 elseif nr > 1 then nr = 1 end
-    if ng < 0 then ng = 0 elseif ng > 1 then ng = 1 end
-    if nb < 0 then nb = 0 elseif nb > 1 then nb = 1 end
-    return nr, ng, nb, a
+    if gm ~= 1 then
+      r, g, b = r ^ gm, g ^ gm, b ^ gm
+    end
+    if s ~= 1 then
+      local lum = LUM_R * r + LUM_G * g + LUM_B * b
+      r = lum + (r - lum) * s
+      g = lum + (g - lum) * s
+      b = lum + (b - lum) * s
+      if r < 0 then r = 0 elseif r > 1 then r = 1 end
+      if g < 0 then g = 0 elseif g > 1 then g = 1 end
+      if b < 0 then b = 0 elseif b > 1 then b = 1 end
+    end
+    return r, g, b, a
   end)
 end
 
@@ -523,7 +546,7 @@ function StadiumPack.image(model, index)
     local data = love.image.newImageData(slot.w, slot.h, "rgba8", slot.rgba)
     -- Before the upload, so it costs one pass over a texture that is at most
     -- a few thousand texels and never touches a frame again.
-    saturate(data)
+    grade(data)
     local image = love.graphics.newImage(data)
     -- N64 art at N64 resolution: nearest keeps the texels the size the
     -- artist drew them, exactly as every other texture in this mode
