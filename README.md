@@ -74,3 +74,19 @@ the original game, as documented by the
 [pret/pokered](https://github.com/pret/pokered) disassembly. No ROM
 data, artwork or audio is included; the mod reads the assets the host
 game already has.
+
+### Acknowledgements — the STADIUM battle models
+
+The STADIUM modules under [`lib/`](lib) — the reader, the rig and the
+renderer — come from
+[scottcandy34/DramaticShapeVoxelMod-latest](https://github.com/scottcandy34/DramaticShapeVoxelMod-latest),
+carried over here and adapted to this port. That code was written
+against [pret/pokestadium](https://github.com/pret/pokestadium), the
+community decompilation of Pokémon Stadium, which is where the bone
+matrix chain, the rotation basis and the animation samplers were learnt
+from. Neither project's data is vendored here.
+
+As with the Game Boy ROM, the models are read out of **the player's own
+Pokémon Stadium (US) 1.0 cartridge**, supplied by them. Nothing of that
+game ships with this mod, and the STADIUM options stay out of reach
+until a cartridge has been supplied.

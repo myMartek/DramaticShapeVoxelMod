@@ -1065,6 +1065,22 @@ function Voxel3D.depth(mode)
         true)
 end
 
+-- Additive drawing, for the light a STADIUM fight puts into the air: the
+-- arrival flare, the sparkle on a shiny, the glow of a move. "add" stops
+-- writing depth as well as changing the blend -- glow that wrote depth would
+-- carve a hole in whatever is drawn behind it -- and anything else puts both
+-- back the way the ordinary pass expects them.
+function Voxel3D.blend(mode)
+  if not active then return end
+  if mode == "add" then
+    pcall(love.graphics.setBlendMode, "add", "alphamultiply")
+    pcall(love.graphics.setDepthMode, "lequal", false)
+  else
+    pcall(love.graphics.setBlendMode, "alpha", "alphamultiply")
+    pcall(love.graphics.setDepthMode, "lequal", true)
+  end
+end
+
 -- ------------------------------------------------ the player's own ghost --
 
 -- The silhouette's colour, and how solid it is.
