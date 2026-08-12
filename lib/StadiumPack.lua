@@ -476,6 +476,44 @@ function StadiumPack.tracks(model, index)
   return out
 end
 
+-- ------- how strong the colours are
+--
+-- These models carry per-vertex colours on the N64, and a good deal of what
+-- makes them read is baked into them. This mod does not have them: a vertex
+-- here is {x, y, z, u, v, shade}, one number computed from the posed normal,
+-- so that a Pokemon catches the same southeastern sun as the roof behind it
+-- (StadiumRig). What is left is the texture times that number -- and side by
+-- side with the Game Boy's four-colour art, which is as saturated as art
+-- gets, the result looks washed out.
+--
+-- So the texture is pulled back toward its own colour, away from its grey:
+-- luminance is left exactly where it is and only the distance from it grows,
+-- which brightens nothing and blows no channel out on its own. 1.0 would be
+-- the raw cartridge.
+--
+-- Done on LOAD rather than baked into the packs, deliberately. It is a look,
+-- looks get adjusted, and a number that can be moved without asking anyone to
+-- extract 151 models again is a number that can actually be tuned.
+StadiumPack.SATURATION = 1.35
+
+-- Rec. 601 luma, which is what the N64's own colour space is closest to.
+local LUM_R, LUM_G, LUM_B = 0.299, 0.587, 0.114
+
+local function saturate(data)
+  local s = StadiumPack.SATURATION
+  if not s or s == 1 then return end
+  data:mapPixel(function(_, _, r, g, b, a)
+    local lum = LUM_R * r + LUM_G * g + LUM_B * b
+    local nr = lum + (r - lum) * s
+    local ng = lum + (g - lum) * s
+    local nb = lum + (b - lum) * s
+    if nr < 0 then nr = 0 elseif nr > 1 then nr = 1 end
+    if ng < 0 then ng = 0 elseif ng > 1 then ng = 1 end
+    if nb < 0 then nb = 0 elseif nb > 1 then nb = 1 end
+    return nr, ng, nb, a
+  end)
+end
+
 -- One texture as a LOVE image, decoded on first ask.
 function StadiumPack.image(model, index)
   local slot = model.textures and model.textures[index]
@@ -483,6 +521,9 @@ function StadiumPack.image(model, index)
   if slot.image ~= nil then return slot.image or nil end
   local ok, img = pcall(function()
     local data = love.image.newImageData(slot.w, slot.h, "rgba8", slot.rgba)
+    -- Before the upload, so it costs one pass over a texture that is at most
+    -- a few thousand texels and never touches a frame again.
+    saturate(data)
     local image = love.graphics.newImage(data)
     -- N64 art at N64 resolution: nearest keeps the texels the size the
     -- artist drew them, exactly as every other texture in this mode
